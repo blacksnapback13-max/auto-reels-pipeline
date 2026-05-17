@@ -627,12 +627,17 @@ function getYtDlpProfileAttempts(preferredProfile) {
   if (!isYtDlpAntiBotFallbackEnabled()) return [preferredProfile];
   if (preferredProfile === "android-vr-no-cookies" || preferredProfile === "tv-no-cookies") return [preferredProfile];
   if (preferredProfile === "anti-bot-no-cookies") return ["anti-bot-no-cookies"];
+  if (preferredProfile === "anti-bot-lite") {
+    return isYtDlpAntiBotNoCookiesEnabled()
+      ? ["anti-bot-lite", "anti-bot", "anti-bot-no-cookies", "android-vr-no-cookies", "tv-no-cookies"]
+      : ["anti-bot-lite", "anti-bot"];
+  }
   if (preferredProfile === "anti-bot") {
     return isYtDlpAntiBotNoCookiesEnabled()
       ? ["anti-bot", "anti-bot-no-cookies", "android-vr-no-cookies", "tv-no-cookies"]
       : ["anti-bot"];
   }
-  const profiles = ["standard", "anti-bot"];
+  const profiles = ["standard", "anti-bot-lite", "anti-bot"];
   if (isYtDlpAntiBotNoCookiesEnabled()) {
     profiles.push("anti-bot-no-cookies", "android-vr-no-cookies", "tv-no-cookies");
   }
@@ -643,6 +648,7 @@ function describeYtDlpProfile(profile) {
   if (profile === "android-vr-no-cookies") return "Android VR без cookies";
   if (profile === "tv-no-cookies") return "TV без cookies";
   if (profile === "anti-bot-no-cookies") return "Innertube/mweb + POT без cookies";
+  if (profile === "anti-bot-lite") return "Innertube/mweb без POT";
   if (profile === "anti-bot") return "Innertube/mweb + POT";
   return "standard";
 }
@@ -683,7 +689,7 @@ function getYtDlpExtractorArgs(profile = "standard") {
     const normalizedToken = poToken.includes("+") ? poToken : `web+${poToken}`;
     values.push(`youtube:player_client=web,default;po_token=${normalizedToken}`);
   }
-  if ((profile === "anti-bot" || profile === "anti-bot-no-cookies") && !poToken && isYtDlpAntiBotFallbackEnabled()) {
+  if (["anti-bot-lite", "anti-bot", "anti-bot-no-cookies"].includes(profile) && !poToken && isYtDlpAntiBotFallbackEnabled()) {
     const fallback = String(process.env.YTDLP_ANTIBOT_EXTRACTOR_ARGS || DEFAULT_YTDLP_ANTIBOT_EXTRACTOR_ARGS).trim();
     if (fallback) values.push(fallback);
   }
@@ -1796,6 +1802,7 @@ function friendlyJobError(error) {
 
 function isYtDlpFallbackableError(error, profile) {
   if (isYoutubeCookiesRequiredError(error)) return true;
+  if (isFormatUnavailableError(error) || isYtDlpTransientFormatError(error)) return true;
   if (!["anti-bot", "anti-bot-no-cookies"].includes(profile)) return false;
   return isYtDlpPotProviderError(error) || isCommandTimeoutError(error);
 }
