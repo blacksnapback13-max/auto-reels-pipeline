@@ -42,6 +42,7 @@ https://github.com/blacksnapback13-max/auto-reels-pipeline
 - скачивает видео через `yt-dlp`;
 - если YouTube не отдает выбранный формат, автоматически пробует несколько fallback-вариантов: легкий 720p MP4, общий bestvideo+bestaudio и single best;
 - поддерживает YouTube browser cookies через секреты `YTDLP_COOKIES_BASE64`, `YTDLP_COOKIES_TEXT` или локальный `YTDLP_COOKIES_PATH`, чтобы обходить серверную проверку "Sign in to confirm you're not a bot";
+- если Render получает anti-bot даже с cookies, автоматически повторяет `yt-dlp` через anti-bot fallback `youtube:player_skip=webpage,configs;player_client=default,mweb`;
 - скачивает доступные YouTube subtitles / auto-captions в `json3` или `vtt`;
 - выбирает несколько фрагментов по story-aware скорингу: крючок, поворот, вывод, естественная граница фразы;
 - отбрасывает клиффхэнгерные концовки и может слегка продлить фрагмент, если payoff идет сразу после мягкого лимита;
@@ -113,6 +114,16 @@ YTDLP_COOKIES_BASE64=<base64 от cookies.txt>
 ```
 
 `cookies.txt` должен быть в Netscape-формате из браузера, где YouTube уже открыт и аккаунт подтвержден. Секрет не логируется: приложение записывает его во временный файл `data/runtime/youtube-cookies.txt` и передает в `yt-dlp` как `--cookies`.
+
+Для более жестких YouTube anti-bot случаев можно добавить дополнительные секреты:
+
+```text
+YTDLP_PO_TOKEN=<web+... или сам token>
+YTDLP_PROXY=<proxy url>
+YTDLP_EXTRACTOR_ARGS=<ручные yt-dlp extractor args>
+```
+
+Anti-bot fallback включен по умолчанию. Отключить его можно через `YTDLP_ANTIBOT_FALLBACK=false`, а заменить аргументы через `YTDLP_ANTIBOT_EXTRACTOR_ARGS`.
 
 Для постоянного хранения на бесплатном Render добавьте в секреты:
 

@@ -40,6 +40,7 @@ const DEFAULT_POLLINATIONS_IMAGE_MODEL = process.env.POLLINATIONS_IMAGE_MODEL ||
 const DEFAULT_POLLINATIONS_TIMEOUT_MS = Number(process.env.POLLINATIONS_TIMEOUT_MS || 60000);
 const DEFAULT_POLLINATIONS_RETRY_ATTEMPTS = Number(process.env.POLLINATIONS_RETRY_ATTEMPTS || 3);
 const DEFAULT_POLLINATIONS_RETRY_DELAY_MS = Number(process.env.POLLINATIONS_RETRY_DELAY_MS || 4500);
+const DEFAULT_YTDLP_ANTIBOT_EXTRACTOR_ARGS = "youtube:player_skip=webpage,configs;player_client=default,mweb";
 const CRC32_TABLE = buildCrc32Table();
 let ffmpegFilterSupport = null;
 let captionRendererSupport = null;
@@ -238,14 +239,14 @@ async function runJob(job) {
     if (cookieStatus.configured) {
       log(job, `YouTube cookies: включены (${cookieStatus.source})`);
     }
-    const metadataRaw = await runCommand("yt-dlp", withYtDlpCookies([
+    const metadataRaw = await runYtDlp(job, [
       "--dump-single-json",
       "--no-warnings",
       "--no-playlist",
       "--skip-download",
       "--no-check-formats",
       job.url
-    ]), { cwd: job.dir, logStdout: false }, job);
+    ], { cwd: job.dir, logStdout: false });
     const metadata = JSON.parse(metadataRaw);
     job.metadata = {
       title: metadata.title || "YouTube video",
@@ -416,7 +417,7 @@ async function downloadCaptionsBestEffort(job) {
   for (const subLangs of attempts) {
     const before = await listCaptionFiles(job.dir);
     try {
-      await runCommand("yt-dlp", withYtDlpCookies([
+      await runYtDlp(job, [
         "--no-playlist",
         "--no-progress",
         "--skip-download",
@@ -429,7 +430,7 @@ async function downloadCaptionsBestEffort(job) {
         "-o",
         "source.%(ext)s",
         job.url
-      ]), { cwd: job.dir }, job);
+      ], { cwd: job.dir });
     } catch (error) {
       log(job, `Субтитры ${subLangs} не скачались: ${shortError(error)}`);
     }
@@ -468,7 +469,7 @@ async function downloadSourceVideo(job) {
       log(job, `Повторяю скачивание: ${attempt.label}`);
     }
     try {
-      await runCommand("yt-dlp", withYtDlpCookies([
+      await runYtDlp(job, [
         "--no-playlist",
         "--no-progress",
         "--no-write-subs",
@@ -481,7 +482,7 @@ async function downloadSourceVideo(job) {
         "-o",
         "source.%(ext)s",
         job.url
-      ]), { cwd: job.dir }, job);
+      ], { cwd: job.dir });
       return;
     } catch (error) {
       errors.push(error);
@@ -574,11 +575,78 @@ function captionPreferenceScore(filename, preferred) {
   return 99;
 }
 
-function withYtDlpCookies(args) {
+async function runYtDlp(job, args, options = {}) {
+  const preferredProfile = job.ytDlpMode || "standard";
+  const profiles = preferredProfile === "anti-bot" || !isYtDlpAntiBotFallbackEnabled()
+    ? [preferredProfile]
+    : ["standard", "anti-bot"];
+  let lastError = null;
+
+  for (const profile of profiles) {
+    try {
+      const output = await runCommand("yt-dlp", withYtDlpOptions(args, profile), options, job);
+      job.ytDlpMode = profile;
+      return output;
+    } catch (error) {
+      lastError = error;
+      if (profile !== "standard" || !isYoutubeCookiesRequiredError(error)) {
+        throw error;
+      }
+      job.ytDlpMode = "anti-bot";
+      log(job, "YouTube anti-bot: повторяю через Innertube/mweb без webpage-проверки");
+    }
+  }
+
+  throw lastError || new Error("yt-dlp завершился без результата");
+}
+
+function withYtDlpOptions(args, profile = "standard") {
+  const result = ["--ignore-config"];
+  const proxy = String(process.env.YTDLP_PROXY || "").trim();
+  const userAgent = String(process.env.YTDLP_USER_AGENT || "").trim();
   const cookies = getYtDlpCookiesStatus();
-  const baseArgs = ["--ignore-config"];
-  if (!cookies.configured || !cookies.path) return [...baseArgs, ...args];
-  return [...baseArgs, "--cookies", cookies.path, ...args];
+
+  if (proxy) result.push("--proxy", proxy);
+  if (userAgent) result.push("--user-agent", userAgent);
+  for (const header of getYtDlpAddHeaders()) {
+    result.push("--add-header", header);
+  }
+  if (cookies.configured && cookies.path) {
+    result.push("--cookies", cookies.path);
+  }
+  for (const extractorArgs of getYtDlpExtractorArgs(profile)) {
+    result.push("--extractor-args", extractorArgs);
+  }
+
+  return [...result, ...args];
+}
+
+function getYtDlpExtractorArgs(profile = "standard") {
+  const values = [];
+  const configured = String(process.env.YTDLP_EXTRACTOR_ARGS || "").trim();
+  const poToken = String(process.env.YTDLP_PO_TOKEN || process.env.YTDLP_YOUTUBE_PO_TOKEN || "").trim();
+  if (configured) values.push(configured);
+  if (poToken) {
+    const normalizedToken = poToken.includes("+") ? poToken : `web+${poToken}`;
+    values.push(`youtube:player_client=web,default;po_token=${normalizedToken}`);
+  }
+  if (profile === "anti-bot" && !poToken && isYtDlpAntiBotFallbackEnabled()) {
+    const fallback = String(process.env.YTDLP_ANTIBOT_EXTRACTOR_ARGS || DEFAULT_YTDLP_ANTIBOT_EXTRACTOR_ARGS).trim();
+    if (fallback) values.push(fallback);
+  }
+  return values;
+}
+
+function isYtDlpAntiBotFallbackEnabled() {
+  const raw = String(process.env.YTDLP_ANTIBOT_FALLBACK || "true").trim().toLowerCase();
+  return !["0", "false", "off", "no"].includes(raw);
+}
+
+function getYtDlpAddHeaders() {
+  return String(process.env.YTDLP_ADD_HEADERS || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
 }
 
 function getYtDlpCookiesStatus() {
@@ -642,6 +710,17 @@ function publicYtDlpCookiesStatus() {
     configured: Boolean(status.configured),
     source: status.source || "",
     error: status.error || ""
+  };
+}
+
+function publicYtDlpAntiBotStatus() {
+  return {
+    fallbackEnabled: isYtDlpAntiBotFallbackEnabled(),
+    extractorArgsConfigured: Boolean(String(process.env.YTDLP_EXTRACTOR_ARGS || "").trim()),
+    poTokenConfigured: Boolean(String(process.env.YTDLP_PO_TOKEN || process.env.YTDLP_YOUTUBE_PO_TOKEN || "").trim()),
+    proxyConfigured: Boolean(String(process.env.YTDLP_PROXY || "").trim()),
+    customUserAgent: Boolean(String(process.env.YTDLP_USER_AGENT || "").trim()),
+    customHeaders: getYtDlpAddHeaders().length
   };
 }
 
@@ -1545,7 +1624,7 @@ async function getCaptionRendererSupport() {
 
 function runCommand(command, args, options = {}, job = null) {
   return new Promise((resolve, reject) => {
-    if (job) log(job, `$ ${command} ${args.map(maskArg).join(" ")}`);
+    if (job) log(job, `$ ${command} ${formatCommandArgs(args)}`);
     const child = spawn(command, args, {
       cwd: options.cwd || ROOT,
       env: process.env,
@@ -1608,17 +1687,31 @@ function shortError(error) {
 function friendlyJobError(error) {
   const message = error instanceof Error ? error.message : String(error);
   if (isYoutubeCookiesRequiredError(message)) {
-    return "YouTube попросил подтвердить, что запрос идет не от бота. Для Render нужно добавить browser cookies в секрет YTDLP_COOKIES_BASE64 или YTDLP_COOKIES_TEXT, после этого повторите сборку.";
+    return "YouTube попросил подтвердить, что запрос идет не от бота. Cookies подключены, но облачный IP Render может требовать свежие browser cookies из приватного окна, PO-token (YTDLP_PO_TOKEN/YTDLP_EXTRACTOR_ARGS) или прокси (YTDLP_PROXY).";
   }
   return message;
 }
 
 function isYoutubeCookiesRequiredError(message) {
-  return /sign in to confirm you'?re not a bot|cookies-from-browser|pass cookies|exporting-youtube-cookies|confirm.*not a bot/i.test(String(message || ""));
+  const value = message instanceof Error ? message.message : String(message || "");
+  return /sign in to confirm you'?re not a bot|cookies-from-browser|pass cookies|exporting-youtube-cookies|confirm.*not a bot/i.test(value);
 }
 
-function maskArg(arg) {
+function formatCommandArgs(args) {
+  return args.map((arg, index) => maskArg(arg, args[index - 1])).join(" ");
+}
+
+function maskArg(arg, previousArg = "") {
   const value = String(arg);
+  if (previousArg === "--cookies") return "<cookies>";
+  if (previousArg === "--proxy") return "<proxy>";
+  if (previousArg === "--extractor-args" && /po_token=/i.test(value)) {
+    return JSON.stringify(value.replace(/po_token=[^;,\s"]+/i, "po_token=<secret>"));
+  }
+  if (previousArg === "--add-header" && /^(authorization|cookie|x-goog-|x-youtube-|x-origin):/i.test(value)) {
+    return "<header>";
+  }
+  if (/po_token=|SAPISID|SSID|HSID|LOGIN_INFO|__Secure/i.test(value)) return "<secret>";
   if (value.length > 180) return `${value.slice(0, 177)}...`;
   return /\s/.test(value) ? JSON.stringify(value) : value;
 }
@@ -3522,7 +3615,8 @@ async function handleApi(req, res, pathname) {
       port: PORT,
       storage: getPersistentStorageStatus(),
       youtube: {
-        cookies: publicYtDlpCookiesStatus()
+        cookies: publicYtDlpCookiesStatus(),
+        antiBot: publicYtDlpAntiBotStatus()
       },
       coverGenerator: {
         ok: imageProviders.length > 0,

@@ -101,6 +101,7 @@
 
 ## История изменений
 
+- 2026-05-17T18:05:00Z: Добавлен anti-bot fallback для Render: при `Sign in to confirm you're not a bot` `yt-dlp` автоматически повторяется через `youtube:player_skip=webpage,configs;player_client=default,mweb`; добавлены env-настройки `YTDLP_PO_TOKEN`, `YTDLP_PROXY`, `YTDLP_EXTRACTOR_ARGS` и маскирование секретов в логах.
 - 2026-05-17T17:50:00Z: Добавлен fallback для `yt-dlp` formats: метаданные читаются с `--skip-download --no-check-formats`, скачивание пробует 720p MP4, затем bestvideo+bestaudio, затем single best.
 - 2026-05-17T17:35:00Z: Добавлена мобильная версия интерфейса: одно-колоночные формы/steps, крупные touch-кнопки, перенос длинных job/log/error строк, аккуратные карточки output/cover на 390px.
 - 2026-05-17T14:20:00Z: Добавлена поддержка YouTube cookies для Render: `YTDLP_COOKIES_BASE64`, `YTDLP_COOKIES_TEXT` и `YTDLP_COOKIES_PATH`; все вызовы `yt-dlp` используют `--cookies`, а ошибка anti-bot стала понятной в UI.
