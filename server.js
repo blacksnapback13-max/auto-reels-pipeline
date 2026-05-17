@@ -44,6 +44,9 @@ const DEFAULT_YTDLP_ANTIBOT_EXTRACTOR_ARGS = "youtube:player-skip=webpage,config
 const YTDLP_ANDROID_VR_EXTRACTOR_ARGS = "youtube:player-skip=webpage,configs;player-client=android_vr";
 const YTDLP_TV_EXTRACTOR_ARGS = "youtube:player-skip=webpage,configs;player-client=tv";
 const DEFAULT_BGUTIL_PROVIDER_HOME = "/opt/bgutil-ytdlp-pot-provider/server";
+const YTDLP_METADATA_TIMEOUT_MS = readPositiveIntEnv("YTDLP_METADATA_TIMEOUT_MS", 90 * 1000);
+const YTDLP_DOWNLOAD_TIMEOUT_MS = readPositiveIntEnv("YTDLP_DOWNLOAD_TIMEOUT_MS", 10 * 60 * 1000);
+const COMMAND_KILL_GRACE_MS = readPositiveIntEnv("COMMAND_KILL_GRACE_MS", 5000);
 const TOOLS_STATUS_CACHE_MS = Number(process.env.TOOLS_STATUS_CACHE_MS || 5 * 60 * 1000);
 const CRC32_TABLE = buildCrc32Table();
 let ffmpegFilterSupport = null;
@@ -91,6 +94,11 @@ function clampInt(value, min, max, fallback) {
   const n = Number.parseInt(value, 10);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(min, Math.min(max, n));
+}
+
+function readPositiveIntEnv(name, fallback) {
+  const n = Number.parseInt(process.env[name] || "", 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
 function normalizeLanguage(value) {
@@ -588,15 +596,19 @@ function captionPreferenceScore(filename, preferred) {
 async function runYtDlp(job, args, options = {}) {
   const profiles = getYtDlpProfileAttempts(job.ytDlpMode || "standard");
   let lastError = null;
+  const commandOptions = {
+    ...options,
+    timeoutMs: options.timeoutMs ?? getYtDlpTimeoutMs(args)
+  };
 
   for (const [index, profile] of profiles.entries()) {
     try {
-      const output = await runCommand("yt-dlp", withYtDlpOptions(args, profile), options, job);
+      const output = await runCommand("yt-dlp", withYtDlpOptions(args, profile), commandOptions, job);
       job.ytDlpMode = profile;
       return output;
     } catch (error) {
       lastError = error;
-      if (index >= profiles.length - 1 || !isYoutubeCookiesRequiredError(error)) {
+      if (index >= profiles.length - 1 || !isYtDlpFallbackableError(error, profile)) {
         throw error;
       }
       job.ytDlpMode = profiles[index + 1];
@@ -605,6 +617,10 @@ async function runYtDlp(job, args, options = {}) {
   }
 
   throw lastError || new Error("yt-dlp завершился без результата");
+}
+
+function getYtDlpTimeoutMs(args) {
+  return args.includes("--skip-download") ? YTDLP_METADATA_TIMEOUT_MS : YTDLP_DOWNLOAD_TIMEOUT_MS;
 }
 
 function getYtDlpProfileAttempts(preferredProfile) {
@@ -661,7 +677,7 @@ function getYtDlpExtractorArgs(profile = "standard") {
   const configured = String(process.env.YTDLP_EXTRACTOR_ARGS || "").trim();
   const poToken = String(process.env.YTDLP_PO_TOKEN || process.env.YTDLP_YOUTUBE_PO_TOKEN || "").trim();
   if (configured) values.push(configured);
-  const providerArgs = getBgutilPotProviderArgs();
+  const providerArgs = getBgutilPotProviderArgs(profile);
   if (providerArgs) values.push(providerArgs);
   if (poToken) {
     const normalizedToken = poToken.includes("+") ? poToken : `web+${poToken}`;
@@ -690,9 +706,10 @@ function isYtDlpAntiBotNoCookiesEnabled() {
   return !["0", "false", "off", "no"].includes(raw);
 }
 
-function getBgutilPotProviderArgs() {
-  const disabled = String(process.env.YTDLP_BGUTIL_POT_PROVIDER || "auto").trim().toLowerCase();
-  if (["0", "false", "off", "no"].includes(disabled)) return "";
+function getBgutilPotProviderArgs(profile = "standard") {
+  const mode = String(process.env.YTDLP_BGUTIL_POT_PROVIDER || "auto").trim().toLowerCase();
+  if (["0", "false", "off", "no"].includes(mode)) return "";
+  if (mode !== "force" && !["anti-bot", "anti-bot-no-cookies"].includes(profile)) return "";
   const providerHome = String(process.env.YTDLP_BGUTIL_PROVIDER_HOME || DEFAULT_BGUTIL_PROVIDER_HOME).trim();
   if (!providerHome) return "";
   if (!fs.existsSync(path.join(providerHome, "build", "generate_once.js"))) return "";
@@ -1685,6 +1702,7 @@ async function getCaptionRendererSupport() {
 function runCommand(command, args, options = {}, job = null) {
   return new Promise((resolve, reject) => {
     if (job) log(job, `$ ${command} ${formatCommandArgs(args)}`);
+    const timeoutMs = Number(options.timeoutMs || 0);
     const child = spawn(command, args, {
       cwd: options.cwd || ROOT,
       env: process.env,
@@ -1694,6 +1712,22 @@ function runCommand(command, args, options = {}, job = null) {
     let stdout = "";
     let stderr = "";
     let stdoutLineBuffer = "";
+    let timedOut = false;
+    let timeout = null;
+    let forceKillTimeout = null;
+    if (timeoutMs > 0) {
+      timeout = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        forceKillTimeout = setTimeout(() => {
+          child.kill("SIGKILL");
+        }, COMMAND_KILL_GRACE_MS);
+      }, timeoutMs);
+    }
+    const clearTimers = () => {
+      if (timeout) clearTimeout(timeout);
+      if (forceKillTimeout) clearTimeout(forceKillTimeout);
+    };
     const emitStdoutLines = (text, flush = false) => {
       if (!options.onStdoutLine) return;
       stdoutLineBuffer += text;
@@ -1727,9 +1761,17 @@ function runCommand(command, args, options = {}, job = null) {
 
     child.stdout.on("data", (chunk) => onData(chunk, "stdout"));
     child.stderr.on("data", (chunk) => onData(chunk, "stderr"));
-    child.on("error", reject);
+    child.on("error", (error) => {
+      clearTimers();
+      reject(error);
+    });
     child.on("close", (code) => {
+      clearTimers();
       emitStdoutLines("", true);
+      if (timedOut) {
+        reject(new Error(`${command} timed out after ${timeoutMs}ms: ${stderr.slice(-1200) || stdout.slice(-1200)}`));
+        return;
+      }
       if (code === 0) {
         resolve(stdout.trim());
       } else {
@@ -1752,9 +1794,25 @@ function friendlyJobError(error) {
   return message;
 }
 
+function isYtDlpFallbackableError(error, profile) {
+  if (isYoutubeCookiesRequiredError(error)) return true;
+  if (!["anti-bot", "anti-bot-no-cookies"].includes(profile)) return false;
+  return isYtDlpPotProviderError(error) || isCommandTimeoutError(error);
+}
+
 function isYoutubeCookiesRequiredError(message) {
   const value = message instanceof Error ? message.message : String(message || "");
   return /sign in to confirm you'?re not a bot|cookies-from-browser|pass cookies|exporting-youtube-cookies|confirm.*not a bot/i.test(value);
+}
+
+function isYtDlpPotProviderError(message) {
+  const value = message instanceof Error ? message.message : String(message || "");
+  return /failed while generating pot|failed to generate an integrity token|generatePoToken|generateTokenMinter/i.test(value);
+}
+
+function isCommandTimeoutError(message) {
+  const value = message instanceof Error ? message.message : String(message || "");
+  return /timed out after \d+ms/i.test(value);
 }
 
 function formatCommandArgs(args) {
