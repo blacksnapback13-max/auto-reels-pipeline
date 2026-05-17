@@ -51,6 +51,7 @@ https://github.com/blacksnapback13-max/auto-reels-pipeline
 - опционально добавляет чистые Reels-style burned-in captions через PNG-оверлеи, сгенерированные Pillow;
 - показывает готовые MP4 прямо в панели проекта с прямой ссылкой на файл;
 - позволяет скачать все MP4 одним ZIP-архивом;
+- при подключенном Cloudinary автоматически зеркалит MP4, PNG-обложки, референс-кадры и job-манифесты во внешнее хранилище, поэтому ссылки продолжают жить после рестарта Render;
 - генерирует и сохраняет черновик описания для каждого reel по транскрибированному фрагменту;
 - обложка 9:16 строится по этому описанию, с чистым кадром из исходника как референсом, и сохраняется рядом с job;
 - AI-генератор делает только визуальный фон, а финальный триггерный заголовок, контрастные плашки, обводка и очистка псевдотекста накладываются локально через Pillow, чтобы слова были читаемыми на мобильном превью;
@@ -97,11 +98,21 @@ HOST=0.0.0.0
 COVER_IMAGE_PROVIDER=auto
 AI_IMAGE_PROVIDER_ORDER=gemini,cloudflare,huggingface,qwen,pollinations
 POLLINATIONS_IMAGE_ENABLED=true
+STORAGE_PROVIDER=auto
+CLOUDINARY_FOLDER=auto-reels
 ```
 
 Опциональные бесплатные ключи добавляются в Render Dashboard как секреты: `GEMINI_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `HUGGINGFACE_API_KEY`, `DASHSCOPE_API_KEY`, `POLLINATIONS_API_KEY`.
 
-Важно: на бесплатном Render файловая система временная. Рилсы и обложки сохраняются и доступны в `data/jobs` во время жизни инстанса, но после рестарта или redeploy могут исчезнуть. Для постоянного хранения следующим слоем нужен S3/R2/Cloudinary или платный диск.
+Для постоянного хранения на бесплатном Render добавьте в секреты:
+
+```text
+CLOUDINARY_URL=cloudinary://<api_key>:<api_secret>@<cloud_name>
+```
+
+После этого MP4, PNG-обложки, reference frame и `job.json` будут сохраняться в Cloudinary. Локальная `data/jobs` остается рабочим кэшем, а ZIP-сборка умеет подтягивать MP4 обратно по внешним URL.
+
+Важно: без `CLOUDINARY_URL` бесплатный Render все равно использует временную файловую систему. Рилсы и обложки доступны в `data/jobs` во время жизни инстанса, но после рестарта или redeploy могут исчезнуть.
 
 ## Следующий слой
 

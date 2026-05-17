@@ -16,6 +16,9 @@ const PORT = Number(process.env.PORT || 3232);
 const HOST = process.env.HOST || "127.0.0.1";
 const MAX_LOGS = 600;
 const END_REACTION_TAIL_SECONDS = 1;
+const STORAGE_PROVIDER = normalizeStorageProvider(process.env.STORAGE_PROVIDER || "auto");
+const CLOUDINARY_FOLDER = sanitizeCloudinaryFolder(process.env.CLOUDINARY_FOLDER || "auto-reels");
+const CLOUDINARY_INDEX_LIMIT = Number(process.env.CLOUDINARY_INDEX_LIMIT || 50);
 const COVER_IMAGE_PROVIDER = normalizeCoverImageProvider(process.env.COVER_IMAGE_PROVIDER || "auto");
 const DEFAULT_IMAGE_PROVIDER_ORDER = process.env.AI_IMAGE_PROVIDER_ORDER || "gemini,cloudflare,huggingface,qwen,pollinations";
 const DEFAULT_IMAGE_PROVIDER_TIMEOUT_MS = Number(process.env.IMAGE_PROVIDER_TIMEOUT_MS || 90000);
@@ -204,6 +207,7 @@ async function completeJob(job) {
   job.status = "done";
   log(job, `Готово: ${job.outputs.length} рилс(а/ов)`);
   await saveJob(job);
+  await persistJobSnapshot(job);
 }
 
 function buildSubLangs(language) {
@@ -377,9 +381,10 @@ async function runJob(job) {
         speed: ""
       };
 
-      job.outputs.push({
+      const outputItem = {
         label: `Reel ${index + 1}`,
         file: `/jobs/${job.id}/${outputPath}`,
+        localFile: `/jobs/${job.id}/${outputPath}`,
         start: segment.start,
         end: segment.end,
         duration: segment.duration,
@@ -388,6 +393,15 @@ async function runJob(job) {
         captions: captionOverlays.length,
         text: segment.text,
         description: generateReelDescription({ text: segment.text })
+      };
+      job.outputs.push(outputItem);
+      await persistJobAsset(job, outputItem, {
+        localPath: absoluteOutput,
+        kind: "reel",
+        resourceType: "video",
+        mimeType: "video/mp4",
+        publicId: `${CLOUDINARY_FOLDER}/${job.id}/outputs/reel-${index + 1}`,
+        logLabel: `MP4 Reel ${index + 1}`
       });
       await saveJob(job);
     }
@@ -1603,17 +1617,271 @@ function mimeType(filePath) {
   }[ext] || "application/octet-stream";
 }
 
+function normalizeStorageProvider(value) {
+  const provider = String(value || "").toLowerCase().trim();
+  if (["auto", "cloudinary", "local", "none", "off"].includes(provider)) {
+    return provider === "off" ? "none" : provider;
+  }
+  return "auto";
+}
+
+function sanitizeCloudinaryFolder(value) {
+  return String(value || "auto-reels")
+    .replace(/\\/g, "/")
+    .split("/")
+    .map((part) => part.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, ""))
+    .filter(Boolean)
+    .join("/")
+    .slice(0, 120) || "auto-reels";
+}
+
+function getCloudinaryConfig() {
+  let fromUrl = null;
+  const rawUrl = process.env.CLOUDINARY_URL;
+  if (rawUrl) {
+    try {
+      const parsed = new URL(rawUrl);
+      if (parsed.protocol === "cloudinary:") {
+        fromUrl = {
+          cloudName: parsed.hostname,
+          apiKey: decodeURIComponent(parsed.username || ""),
+          apiSecret: decodeURIComponent(parsed.password || "")
+        };
+      }
+    } catch {
+      fromUrl = null;
+    }
+  }
+
+  const config = fromUrl || {
+    cloudName: process.env.CLOUDINARY_CLOUD_NAME || "",
+    apiKey: process.env.CLOUDINARY_API_KEY || "",
+    apiSecret: process.env.CLOUDINARY_API_SECRET || ""
+  };
+  if (!config.cloudName || !config.apiKey || !config.apiSecret) return null;
+  return config;
+}
+
+function getPersistentStorageStatus() {
+  const cloudinary = getCloudinaryConfig();
+  const provider = STORAGE_PROVIDER === "auto"
+    ? (cloudinary ? "cloudinary" : "local")
+    : STORAGE_PROVIDER;
+  const ok = provider === "cloudinary" ? Boolean(cloudinary) : provider === "local";
+  return {
+    ok,
+    provider,
+    folder: provider === "cloudinary" ? CLOUDINARY_FOLDER : "",
+    mode: provider === "cloudinary" ? "external-assets" : "render-ephemeral-local",
+    configured: provider === "cloudinary" ? Boolean(cloudinary) : provider === "local"
+  };
+}
+
+function persistentStorageReady() {
+  const status = getPersistentStorageStatus();
+  return status.ok && status.provider === "cloudinary";
+}
+
+async function persistJobAsset(job, asset, options) {
+  if (!persistentStorageReady()) return false;
+  try {
+    const result = await uploadCloudinaryFile(options.localPath, {
+      resourceType: options.resourceType,
+      mimeType: options.mimeType,
+      publicId: options.publicId,
+      filename: path.basename(options.localPath)
+    });
+    asset.file = result.secureUrl;
+    asset.storage = {
+      provider: "cloudinary",
+      kind: options.kind || "asset",
+      url: result.secureUrl,
+      publicId: result.publicId,
+      resourceType: result.resourceType,
+      bytes: result.bytes || 0,
+      savedAt: iso()
+    };
+    log(job, `${options.logLabel || "Файл"} сохранен во внешнее хранилище Cloudinary`);
+    return true;
+  } catch (error) {
+    log(job, `${options.logLabel || "Файл"} остался локально: Cloudinary не принял файл (${shortError(error)})`);
+    return false;
+  }
+}
+
+async function persistJobSnapshot(job) {
+  if (!persistentStorageReady()) return false;
+  try {
+    const snapshot = {
+      ...publicJob(job),
+      dir: "",
+      storage: {
+        provider: "cloudinary",
+        folder: `${CLOUDINARY_FOLDER}/${job.id}`,
+        savedAt: iso()
+      }
+    };
+    const result = await uploadCloudinaryBuffer(Buffer.from(JSON.stringify(snapshot, null, 2), "utf8"), {
+      resourceType: "raw",
+      mimeType: "application/json",
+      publicId: `${CLOUDINARY_FOLDER}/${job.id}/job.json`,
+      filename: "job.json"
+    });
+    await updateCloudinaryJobIndex(job, result.secureUrl);
+    return true;
+  } catch (error) {
+    log(job, `Манифест job не сохранился во внешнее хранилище: ${shortError(error)}`);
+    return false;
+  }
+}
+
+async function updateCloudinaryJobIndex(job, manifestUrl) {
+  const index = await readCloudinaryJobIndex().catch(() => ({ version: 1, jobs: [] }));
+  const maxItems = Math.max(1, Math.min(200, Number(CLOUDINARY_INDEX_LIMIT) || 50));
+  const entry = {
+    id: job.id,
+    status: job.status,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    title: job.metadata?.title || "",
+    uploader: job.metadata?.uploader || "",
+    outputs: (job.outputs || []).length,
+    manifestUrl,
+    webpageUrl: job.metadata?.webpage_url || job.url || ""
+  };
+  const jobsIndex = Array.isArray(index.jobs) ? index.jobs : [];
+  const next = {
+    version: 1,
+    updatedAt: iso(),
+    jobs: [entry, ...jobsIndex.filter((item) => item?.id !== job.id)]
+      .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
+      .slice(0, maxItems)
+  };
+  await uploadCloudinaryBuffer(Buffer.from(JSON.stringify(next, null, 2), "utf8"), {
+    resourceType: "raw",
+    mimeType: "application/json",
+    publicId: `${CLOUDINARY_FOLDER}/index/jobs.json`,
+    filename: "jobs.json"
+  });
+}
+
+async function readCloudinaryJobIndex() {
+  const url = `${cloudinaryDeliveryUrl("raw", `${CLOUDINARY_FOLDER}/index/jobs.json`)}?t=${Date.now()}`;
+  const response = await fetchWithTimeout(url, {
+    method: "GET",
+    headers: { accept: "application/json" }
+  }, 12000);
+  if (!response.ok) throw await buildHttpError(response, "Cloudinary job index is unavailable");
+  return response.json();
+}
+
+async function loadPersistentJobs() {
+  if (!persistentStorageReady()) return;
+  let index;
+  try {
+    index = await readCloudinaryJobIndex();
+  } catch {
+    return;
+  }
+
+  const entries = Array.isArray(index.jobs) ? index.jobs.slice(0, Math.max(1, Math.min(200, Number(CLOUDINARY_INDEX_LIMIT) || 50))) : [];
+  for (const entry of entries) {
+    const manifestUrl = entry?.manifestUrl || cloudinaryDeliveryUrl("raw", `${CLOUDINARY_FOLDER}/${entry?.id || ""}/job.json`);
+    if (!entry?.id || !manifestUrl) continue;
+    try {
+      const response = await fetchWithTimeout(`${manifestUrl}${manifestUrl.includes("?") ? "&" : "?"}t=${Date.now()}`, {
+        method: "GET",
+        headers: { accept: "application/json" }
+      }, 12000);
+      if (!response.ok) continue;
+      const job = await response.json();
+      if (!job?.id) continue;
+      job.dir = path.join(JOBS_DIR, job.id);
+      if (job.status === "running" || job.status === "queued") {
+        job.status = "failed";
+        job.error = "Задача была остановлена при завершении сервера";
+        for (const step of job.steps || []) {
+          if (step.status === "running") step.status = "failed";
+        }
+      }
+      const existing = jobs.get(job.id);
+      if (!existing || String(job.updatedAt || "").localeCompare(String(existing.updatedAt || "")) > 0) {
+        jobs.set(job.id, job);
+      }
+    } catch {
+      // Ignore broken remote manifests. The local app must still boot.
+    }
+  }
+}
+
+async function uploadCloudinaryFile(filePath, options) {
+  const buffer = await fsp.readFile(filePath);
+  return uploadCloudinaryBuffer(buffer, options);
+}
+
+async function uploadCloudinaryBuffer(buffer, options) {
+  const config = getCloudinaryConfig();
+  if (!config) throw new Error("CLOUDINARY_URL или CLOUDINARY_* переменные не настроены");
+  const resourceType = ["image", "video", "raw"].includes(options.resourceType) ? options.resourceType : "raw";
+  const timestamp = Math.floor(Date.now() / 1000);
+  const params = {
+    public_id: options.publicId,
+    overwrite: "true",
+    timestamp: String(timestamp)
+  };
+  const signature = signCloudinaryParams(params, config.apiSecret);
+  const form = new FormData();
+  form.append("file", new Blob([buffer], { type: options.mimeType || "application/octet-stream" }), options.filename || "asset");
+  for (const [key, value] of Object.entries(params)) {
+    form.append(key, value);
+  }
+  form.append("api_key", config.apiKey);
+  form.append("signature", signature);
+
+  const endpoint = `https://api.cloudinary.com/v1_1/${encodeURIComponent(config.cloudName)}/${resourceType}/upload`;
+  const response = await fetchWithTimeout(endpoint, {
+    method: "POST",
+    body: form
+  }, Number(process.env.CLOUDINARY_UPLOAD_TIMEOUT_MS || 180000));
+  if (!response.ok) throw await buildHttpError(response, "Cloudinary upload failed");
+  const payload = await response.json();
+  return {
+    secureUrl: payload.secure_url || cloudinaryDeliveryUrl(resourceType, payload.public_id || options.publicId),
+    publicId: payload.public_id || options.publicId,
+    resourceType: payload.resource_type || resourceType,
+    bytes: Number(payload.bytes || buffer.length),
+    format: payload.format || ""
+  };
+}
+
+function signCloudinaryParams(params, apiSecret) {
+  const base = Object.entries(params)
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("&");
+  return crypto.createHash("sha1").update(`${base}${apiSecret}`).digest("hex");
+}
+
+function cloudinaryDeliveryUrl(resourceType, publicId) {
+  const config = getCloudinaryConfig();
+  const cleanPublicId = String(publicId || "").split("/").map(encodeURIComponent).join("/");
+  return config ? `https://res.cloudinary.com/${encodeURIComponent(config.cloudName)}/${resourceType}/upload/${cleanPublicId}` : "";
+}
+
+function isHttpUrl(value) {
+  return /^https?:\/\//i.test(String(value || ""));
+}
+
 async function buildJobZip(job) {
   const entries = [];
   const usedNames = new Set();
 
   for (const [index, output] of (job.outputs || []).entries()) {
-    const filePath = resolveJobOutputPath(job, output);
-    if (!filePath) continue;
-    const stat = await fsp.stat(filePath).catch(() => null);
-    if (!stat?.isFile()) continue;
+    const data = await readJobOutputBuffer(job, output).catch(() => null);
+    if (!data) continue;
 
-    let name = sanitizeZipEntryName(path.basename(filePath)) || `reel-${index + 1}.mp4`;
+    let name = sanitizeZipEntryName(outputFileName(output, index)) || `reel-${index + 1}.mp4`;
     if (usedNames.has(name)) {
       const ext = path.extname(name);
       const base = path.basename(name, ext);
@@ -1623,8 +1891,8 @@ async function buildJobZip(job) {
 
     entries.push({
       name,
-      data: await fsp.readFile(filePath),
-      mtime: stat.mtime
+      data: data.buffer,
+      mtime: data.mtime || new Date()
     });
   }
 
@@ -1635,10 +1903,47 @@ async function buildJobZip(job) {
   return createZipBuffer(entries);
 }
 
+async function readJobOutputBuffer(job, output) {
+  const filePath = resolveJobOutputPath(job, output);
+  if (filePath) {
+    const stat = await fsp.stat(filePath).catch(() => null);
+    if (stat?.isFile()) {
+      return {
+        buffer: await fsp.readFile(filePath),
+        mtime: stat.mtime
+      };
+    }
+  }
+
+  const remoteUrl = isHttpUrl(output?.file) ? output.file : output?.storage?.url;
+  if (!remoteUrl || !isHttpUrl(remoteUrl)) return null;
+  const response = await fetchWithTimeout(remoteUrl, {
+    method: "GET"
+  }, Number(process.env.REMOTE_ASSET_DOWNLOAD_TIMEOUT_MS || 180000));
+  if (!response.ok) throw await buildHttpError(response, "Remote reel download failed");
+  return {
+    buffer: Buffer.from(await response.arrayBuffer()),
+    mtime: output?.storage?.savedAt ? new Date(output.storage.savedAt) : new Date()
+  };
+}
+
+function outputFileName(output, index) {
+  const local = output?.localFile || output?.file || "";
+  try {
+    const parsed = isHttpUrl(local) ? new URL(local) : null;
+    const candidate = parsed ? parsed.pathname : local;
+    const name = path.basename(candidate);
+    return name || `reel-${index + 1}.mp4`;
+  } catch {
+    return `reel-${index + 1}.mp4`;
+  }
+}
+
 function resolveJobOutputPath(job, output) {
+  const outputFile = output?.localFile || output?.file;
   const prefix = `/jobs/${job.id}/`;
-  if (!output?.file || !String(output.file).startsWith(prefix)) return null;
-  const relative = String(output.file).slice(prefix.length);
+  if (!outputFile || !String(outputFile).startsWith(prefix)) return null;
+  const relative = String(outputFile).slice(prefix.length);
   const filePath = path.resolve(job.dir, relative);
   const root = path.resolve(job.dir);
   return filePath === root || filePath.startsWith(`${root}${path.sep}`) ? filePath : null;
@@ -1812,10 +2117,25 @@ async function generateCoverForOutput(job, outputIndex, description, settingsInp
 
   const coverName = `reel-${outputIndex + 1}-cover.${imageExtension(image.mimeType || "image/png")}`;
   const relativePath = path.join("covers", coverName);
-  await fsp.writeFile(path.join(job.dir, relativePath), image.buffer);
+  const coverLocalPath = path.join(job.dir, relativePath);
+  const coverLocalFile = `/jobs/${job.id}/${relativePath.split(path.sep).join("/")}`;
+  await fsp.writeFile(coverLocalPath, image.buffer);
+  const coverAsset = {
+    file: coverLocalFile,
+    localFile: coverLocalFile
+  };
+  await persistJobAsset(job, coverAsset, {
+    localPath: coverLocalPath,
+    kind: "cover",
+    resourceType: "image",
+    mimeType: image.mimeType || "image/png",
+    publicId: `${CLOUDINARY_FOLDER}/${job.id}/covers/reel-${outputIndex + 1}-cover`,
+    logLabel: `обложка Reel ${outputIndex + 1}`
+  });
 
   output.cover = {
-    file: `/jobs/${job.id}/${relativePath.split(path.sep).join("/")}`,
+    file: coverAsset.file,
+    localFile: coverLocalFile,
     referenceFrame: referenceFrame?.file || "",
     provider: image.provider,
     model: image.model,
@@ -1829,11 +2149,13 @@ async function generateCoverForOutput(job, outputIndex, description, settingsInp
     rawFile: image.rawFile || "",
     typography: image.typography || "",
     description: coverDescription,
-    fallbackReason: image.fallbackReason || ""
+    fallbackReason: image.fallbackReason || "",
+    storage: coverAsset.storage || null
   };
   output.description = coverDescription;
   log(job, `Обложка готова: ${coverName}`);
   await saveJob(job);
+  await persistJobSnapshot(job);
   return output.cover;
 }
 
@@ -1872,10 +2194,24 @@ async function captureReelReferenceFrame(job, output, outputIndex, coversDir) {
   ], { cwd: job.dir, logStdout: false }, job);
 
   const buffer = await fsp.readFile(framePath);
+  const frameAsset = {
+    file: `/jobs/${job.id}/covers/${frameName}`,
+    localFile: `/jobs/${job.id}/covers/${frameName}`
+  };
+  await persistJobAsset(job, frameAsset, {
+    localPath: framePath,
+    kind: "reference-frame",
+    resourceType: "image",
+    mimeType: "image/jpeg",
+    publicId: `${CLOUDINARY_FOLDER}/${job.id}/covers/reel-${outputIndex + 1}-reference`,
+    logLabel: `референс-кадр Reel ${outputIndex + 1}`
+  });
   return {
     name: frameName,
     path: framePath,
-    file: `/jobs/${job.id}/covers/${frameName}`,
+    file: frameAsset.file,
+    localFile: frameAsset.localFile,
+    storage: frameAsset.storage || null,
     mimeType: "image/jpeg",
     data: buffer.toString("base64")
   };
@@ -3029,6 +3365,7 @@ async function handleApi(req, res, pathname) {
     sendJson(res, 200, {
       ok: true,
       port: PORT,
+      storage: getPersistentStorageStatus(),
       coverGenerator: {
         ok: imageProviders.length > 0,
         provider: imageProviders[0] || "",
@@ -3186,6 +3523,7 @@ async function loadJobs() {
       // Ignore broken historical job folders.
     }
   }
+  await loadPersistentJobs();
 }
 
 async function main() {

@@ -17,6 +17,10 @@ services:
         value: gemini,cloudflare,huggingface,qwen,pollinations
       - key: POLLINATIONS_IMAGE_ENABLED
         value: "true"
+      - key: STORAGE_PROVIDER
+        value: auto
+      - key: CLOUDINARY_FOLDER
+        value: auto-reels
       - key: GEMINI_API_KEY
         sync: false
       - key: CLOUDFLARE_ACCOUNT_ID
@@ -28,4 +32,6 @@ services:
       - key: DASHSCOPE_API_KEY
         sync: false
       - key: POLLINATIONS_API_KEY
+        sync: false
+      - key: CLOUDINARY_URL
         sync: false
