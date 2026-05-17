@@ -89,10 +89,10 @@ repo: https://github.com/blacksnapback13-max/auto-reels-pipeline
 runtime: docker
 plan: free
 region: frankfurt
-health: /api/config
+health: /api/health
 ```
 
-Docker-образ внутри себя ставит `ffmpeg`, `ffprobe`, `python3`, `Pillow` и свежий `yt-dlp`, поэтому онлайн-версия запускает тот же пайплайн, что и локальная.
+Docker-образ внутри себя ставит `ffmpeg`, `ffprobe`, `python3`, `Pillow` и свежий `yt-dlp`, поэтому онлайн-версия запускает тот же пайплайн, что и локальная. Render healthcheck использует легкий `/api/health`, а полный `/api/config` кэширует проверку инструментов.
 
 Обязательные переменные Render:
 

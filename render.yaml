@@ -5,7 +5,7 @@ services:
     plan: free
     region: frankfurt
     autoDeploy: true
-    healthCheckPath: /api/config
+    healthCheckPath: /api/health
     envVars:
       - key: NODE_ENV
         value: production

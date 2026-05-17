@@ -101,6 +101,7 @@
 
 ## История изменений
 
+- 2026-05-17T18:15:00Z: Render healthcheck вынесен на легкий `/api/health`, `/api/config` теперь кэширует статус `yt-dlp`/`ffmpeg`/`python`, а job-логи выводятся в stdout с маскированием секретов.
 - 2026-05-17T18:05:00Z: Добавлен anti-bot fallback для Render: при `Sign in to confirm you're not a bot` `yt-dlp` автоматически повторяется через `youtube:player_skip=webpage,configs;player_client=default,mweb`; добавлены env-настройки `YTDLP_PO_TOKEN`, `YTDLP_PROXY`, `YTDLP_EXTRACTOR_ARGS` и маскирование секретов в логах.
 - 2026-05-17T17:50:00Z: Добавлен fallback для `yt-dlp` formats: метаданные читаются с `--skip-download --no-check-formats`, скачивание пробует 720p MP4, затем bestvideo+bestaudio, затем single best.
 - 2026-05-17T17:35:00Z: Добавлена мобильная версия интерфейса: одно-колоночные формы/steps, крупные touch-кнопки, перенос длинных job/log/error строк, аккуратные карточки output/cover на 390px.

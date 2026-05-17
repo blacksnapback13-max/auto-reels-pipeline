@@ -41,10 +41,14 @@ const DEFAULT_POLLINATIONS_TIMEOUT_MS = Number(process.env.POLLINATIONS_TIMEOUT_
 const DEFAULT_POLLINATIONS_RETRY_ATTEMPTS = Number(process.env.POLLINATIONS_RETRY_ATTEMPTS || 3);
 const DEFAULT_POLLINATIONS_RETRY_DELAY_MS = Number(process.env.POLLINATIONS_RETRY_DELAY_MS || 4500);
 const DEFAULT_YTDLP_ANTIBOT_EXTRACTOR_ARGS = "youtube:player_skip=webpage,configs;player_client=default,mweb";
+const TOOLS_STATUS_CACHE_MS = Number(process.env.TOOLS_STATUS_CACHE_MS || 5 * 60 * 1000);
 const CRC32_TABLE = buildCrc32Table();
 let ffmpegFilterSupport = null;
 let captionRendererSupport = null;
 let ytdlpCookiesStatus = null;
+let toolsStatusCache = null;
+let toolsStatusCacheAt = 0;
+let toolsStatusRefreshPromise = null;
 
 const STEP_DEFS = [
   ["metadata", "Метаданные YouTube"],
@@ -185,6 +189,9 @@ function log(job, message) {
   job.logs.push(line);
   if (job.logs.length > MAX_LOGS) {
     job.logs.splice(0, job.logs.length - MAX_LOGS);
+  }
+  if (process.env.LOG_JOB_EVENTS !== "false") {
+    console.log(`[job ${job.id}] ${line}`);
   }
 }
 
@@ -3608,6 +3615,11 @@ function normalizeCoverSize(value) {
 }
 
 async function handleApi(req, res, pathname) {
+  if (req.method === "GET" && pathname === "/api/health") {
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
   if (req.method === "GET" && pathname === "/api/config") {
     const imageProviders = getEnabledImageProviders();
     sendJson(res, 200, {
@@ -3629,7 +3641,7 @@ async function handleApi(req, res, pathname) {
         size: imageProviders[0] === "gemini" ? `${GEMINI_COVER_ASPECT_RATIO} ${GEMINI_IMAGE_SIZE}` : "9:16 720x1280",
         quality: imageProviders[0] === "gemini" ? GEMINI_IMAGE_SIZE : "free-tier"
       },
-      tools: await checkTools()
+      tools: await checkToolsCached()
     });
     return;
   }
@@ -3752,6 +3764,30 @@ async function checkTools() {
   }
   tools.captionRenderer = await getCaptionRendererSupport();
   return tools;
+}
+
+async function checkToolsCached() {
+  const now = Date.now();
+  if (toolsStatusCache && now - toolsStatusCacheAt < TOOLS_STATUS_CACHE_MS) {
+    return toolsStatusCache;
+  }
+  if (toolsStatusRefreshPromise) {
+    if (toolsStatusCache) return toolsStatusCache;
+    return toolsStatusRefreshPromise;
+  }
+
+  toolsStatusRefreshPromise = checkTools()
+    .then((tools) => {
+      toolsStatusCache = tools;
+      toolsStatusCacheAt = Date.now();
+      return tools;
+    })
+    .finally(() => {
+      toolsStatusRefreshPromise = null;
+    });
+
+  if (toolsStatusCache) return toolsStatusCache;
+  return toolsStatusRefreshPromise;
 }
 
 async function loadJobs() {
