@@ -654,7 +654,7 @@ function getYtDlpExtractorArgs(profile = "standard") {
     const normalizedToken = poToken.includes("+") ? poToken : `web+${poToken}`;
     values.push(`youtube:player_client=web,default;po_token=${normalizedToken}`);
   }
-  if (profile === "anti-bot" && !poToken && isYtDlpAntiBotFallbackEnabled()) {
+  if ((profile === "anti-bot" || profile === "anti-bot-no-cookies") && !poToken && isYtDlpAntiBotFallbackEnabled()) {
     const fallback = String(process.env.YTDLP_ANTIBOT_EXTRACTOR_ARGS || DEFAULT_YTDLP_ANTIBOT_EXTRACTOR_ARGS).trim();
     if (fallback) values.push(fallback);
   }
