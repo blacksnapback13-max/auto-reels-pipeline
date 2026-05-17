@@ -42,7 +42,7 @@ https://github.com/blacksnapback13-max/auto-reels-pipeline
 - скачивает видео через `yt-dlp`;
 - если YouTube не отдает выбранный формат, автоматически пробует несколько fallback-вариантов: легкий 720p MP4, общий bestvideo+bestaudio и single best;
 - поддерживает YouTube browser cookies через секреты `YTDLP_COOKIES_BASE64`, `YTDLP_COOKIES_TEXT` или локальный `YTDLP_COOKIES_PATH`, чтобы обходить серверную проверку "Sign in to confirm you're not a bot";
-- если Render получает anti-bot даже с cookies, автоматически повторяет `yt-dlp` через anti-bot fallback `youtube:player_skip=webpage,configs;player_client=default,mweb`;
+- если Render получает anti-bot даже с cookies, автоматически повторяет `yt-dlp` через anti-bot fallback `youtube:player_skip=webpage,configs;player_client=default,mweb`, bgutil PO-token provider и третий публичный режим без cookies;
 - скачивает доступные YouTube subtitles / auto-captions в `json3` или `vtt`;
 - выбирает несколько фрагментов по story-aware скорингу: крючок, поворот, вывод, естественная граница фразы;
 - отбрасывает клиффхэнгерные концовки и может слегка продлить фрагмент, если payoff идет сразу после мягкого лимита;
@@ -94,6 +94,8 @@ health: /api/health
 
 Docker-образ внутри себя ставит `ffmpeg`, `ffprobe`, `python3`, `Pillow` и свежий `yt-dlp`, поэтому онлайн-версия запускает тот же пайплайн, что и локальная. Render healthcheck использует легкий `/api/health`, а полный `/api/config` кэширует проверку инструментов.
 
+В Docker также ставится `bgutil-ytdlp-pot-provider` 1.3.1. Это бесплатный PO-token provider для `yt-dlp`, который помогает на облачных IP, где YouTube отклоняет даже browser cookies.
+
 Обязательные переменные Render:
 
 ```text
@@ -124,6 +126,7 @@ YTDLP_EXTRACTOR_ARGS=<ручные yt-dlp extractor args>
 ```
 
 Anti-bot fallback включен по умолчанию. Отключить его можно через `YTDLP_ANTIBOT_FALLBACK=false`, а заменить аргументы через `YTDLP_ANTIBOT_EXTRACTOR_ARGS`.
+Третий fallback без cookies для публичных видео включен через `YTDLP_ANTIBOT_NO_COOKIES=true`.
 
 Для постоянного хранения на бесплатном Render добавьте в секреты:
 

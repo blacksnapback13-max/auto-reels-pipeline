@@ -41,6 +41,7 @@ const DEFAULT_POLLINATIONS_TIMEOUT_MS = Number(process.env.POLLINATIONS_TIMEOUT_
 const DEFAULT_POLLINATIONS_RETRY_ATTEMPTS = Number(process.env.POLLINATIONS_RETRY_ATTEMPTS || 3);
 const DEFAULT_POLLINATIONS_RETRY_DELAY_MS = Number(process.env.POLLINATIONS_RETRY_DELAY_MS || 4500);
 const DEFAULT_YTDLP_ANTIBOT_EXTRACTOR_ARGS = "youtube:player_skip=webpage,configs;player_client=default,mweb";
+const DEFAULT_BGUTIL_PROVIDER_HOME = "/opt/bgutil-ytdlp-pot-provider/server";
 const TOOLS_STATUS_CACHE_MS = Number(process.env.TOOLS_STATUS_CACHE_MS || 5 * 60 * 1000);
 const CRC32_TABLE = buildCrc32Table();
 let ffmpegFilterSupport = null;
@@ -583,28 +584,42 @@ function captionPreferenceScore(filename, preferred) {
 }
 
 async function runYtDlp(job, args, options = {}) {
-  const preferredProfile = job.ytDlpMode || "standard";
-  const profiles = preferredProfile === "anti-bot" || !isYtDlpAntiBotFallbackEnabled()
-    ? [preferredProfile]
-    : ["standard", "anti-bot"];
+  const profiles = getYtDlpProfileAttempts(job.ytDlpMode || "standard");
   let lastError = null;
 
-  for (const profile of profiles) {
+  for (const [index, profile] of profiles.entries()) {
     try {
       const output = await runCommand("yt-dlp", withYtDlpOptions(args, profile), options, job);
       job.ytDlpMode = profile;
       return output;
     } catch (error) {
       lastError = error;
-      if (profile !== "standard" || !isYoutubeCookiesRequiredError(error)) {
+      if (index >= profiles.length - 1 || !isYoutubeCookiesRequiredError(error)) {
         throw error;
       }
-      job.ytDlpMode = "anti-bot";
-      log(job, "YouTube anti-bot: повторяю через Innertube/mweb без webpage-проверки");
+      job.ytDlpMode = profiles[index + 1];
+      log(job, `YouTube anti-bot: повторяю в режиме ${describeYtDlpProfile(job.ytDlpMode)}`);
     }
   }
 
   throw lastError || new Error("yt-dlp завершился без результата");
+}
+
+function getYtDlpProfileAttempts(preferredProfile) {
+  if (!isYtDlpAntiBotFallbackEnabled()) return [preferredProfile];
+  if (preferredProfile === "anti-bot-no-cookies") return ["anti-bot-no-cookies"];
+  if (preferredProfile === "anti-bot") {
+    return isYtDlpAntiBotNoCookiesEnabled() ? ["anti-bot", "anti-bot-no-cookies"] : ["anti-bot"];
+  }
+  const profiles = ["standard", "anti-bot"];
+  if (isYtDlpAntiBotNoCookiesEnabled()) profiles.push("anti-bot-no-cookies");
+  return profiles;
+}
+
+function describeYtDlpProfile(profile) {
+  if (profile === "anti-bot-no-cookies") return "Innertube/mweb + POT без cookies";
+  if (profile === "anti-bot") return "Innertube/mweb + POT";
+  return "standard";
 }
 
 function withYtDlpOptions(args, profile = "standard") {
@@ -618,7 +633,7 @@ function withYtDlpOptions(args, profile = "standard") {
   for (const header of getYtDlpAddHeaders()) {
     result.push("--add-header", header);
   }
-  if (cookies.configured && cookies.path) {
+  if (cookies.configured && cookies.path && profile !== "anti-bot-no-cookies") {
     result.push("--cookies", cookies.path);
   }
   for (const extractorArgs of getYtDlpExtractorArgs(profile)) {
@@ -633,6 +648,8 @@ function getYtDlpExtractorArgs(profile = "standard") {
   const configured = String(process.env.YTDLP_EXTRACTOR_ARGS || "").trim();
   const poToken = String(process.env.YTDLP_PO_TOKEN || process.env.YTDLP_YOUTUBE_PO_TOKEN || "").trim();
   if (configured) values.push(configured);
+  const providerArgs = getBgutilPotProviderArgs();
+  if (providerArgs) values.push(providerArgs);
   if (poToken) {
     const normalizedToken = poToken.includes("+") ? poToken : `web+${poToken}`;
     values.push(`youtube:player_client=web,default;po_token=${normalizedToken}`);
@@ -647,6 +664,20 @@ function getYtDlpExtractorArgs(profile = "standard") {
 function isYtDlpAntiBotFallbackEnabled() {
   const raw = String(process.env.YTDLP_ANTIBOT_FALLBACK || "true").trim().toLowerCase();
   return !["0", "false", "off", "no"].includes(raw);
+}
+
+function isYtDlpAntiBotNoCookiesEnabled() {
+  const raw = String(process.env.YTDLP_ANTIBOT_NO_COOKIES || "true").trim().toLowerCase();
+  return !["0", "false", "off", "no"].includes(raw);
+}
+
+function getBgutilPotProviderArgs() {
+  const disabled = String(process.env.YTDLP_BGUTIL_POT_PROVIDER || "auto").trim().toLowerCase();
+  if (["0", "false", "off", "no"].includes(disabled)) return "";
+  const providerHome = String(process.env.YTDLP_BGUTIL_PROVIDER_HOME || DEFAULT_BGUTIL_PROVIDER_HOME).trim();
+  if (!providerHome) return "";
+  if (!fs.existsSync(path.join(providerHome, "build", "generate_once.js"))) return "";
+  return `youtubepot-bgutilscript:server_home=${providerHome}`;
 }
 
 function getYtDlpAddHeaders() {
@@ -723,8 +754,10 @@ function publicYtDlpCookiesStatus() {
 function publicYtDlpAntiBotStatus() {
   return {
     fallbackEnabled: isYtDlpAntiBotFallbackEnabled(),
+    noCookiesFallbackEnabled: isYtDlpAntiBotNoCookiesEnabled(),
     extractorArgsConfigured: Boolean(String(process.env.YTDLP_EXTRACTOR_ARGS || "").trim()),
     poTokenConfigured: Boolean(String(process.env.YTDLP_PO_TOKEN || process.env.YTDLP_YOUTUBE_PO_TOKEN || "").trim()),
+    bgutilPotProviderConfigured: Boolean(getBgutilPotProviderArgs()),
     proxyConfigured: Boolean(String(process.env.YTDLP_PROXY || "").trim()),
     customUserAgent: Boolean(String(process.env.YTDLP_USER_AGENT || "").trim()),
     customHeaders: getYtDlpAddHeaders().length

@@ -4,10 +4,16 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     ca-certificates \
     ffmpeg \
+    git \
     python3 \
     python3-pil \
     python3-pip \
-  && python3 -m pip install --break-system-packages --no-cache-dir --upgrade yt-dlp \
+  && python3 -m pip install --break-system-packages --no-cache-dir --upgrade yt-dlp bgutil-ytdlp-pot-provider==1.3.1 \
+  && git clone --depth 1 --branch 1.3.1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil-ytdlp-pot-provider \
+  && cd /opt/bgutil-ytdlp-pot-provider/server \
+  && npm ci \
+  && npx tsc \
+  && npm cache clean --force \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
 
