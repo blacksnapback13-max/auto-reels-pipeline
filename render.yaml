@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: auto-reels-pipeline
+    runtime: docker
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: COVER_IMAGE_PROVIDER
+        value: auto
+      - key: AI_IMAGE_PROVIDER_ORDER
+        value: gemini,cloudflare,huggingface,qwen,pollinations
+      - key: POLLINATIONS_IMAGE_ENABLED
+        value: "true"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: CLOUDFLARE_ACCOUNT_ID
+        sync: false
+      - key: CLOUDFLARE_API_TOKEN
+        sync: false
+      - key: HUGGINGFACE_API_KEY
+        sync: false
+      - key: DASHSCOPE_API_KEY
+        sync: false
+      - key: POLLINATIONS_API_KEY
+        sync: false
