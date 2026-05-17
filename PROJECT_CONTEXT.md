@@ -101,6 +101,7 @@
 
 ## История изменений
 
+- 2026-05-17T12:24:08Z: GitHub repo создан и опубликован: `https://github.com/blacksnapback13-max/auto-reels-pipeline`; Render service `auto-reels-shtunda13` live на `https://auto-reels-shtunda13.onrender.com`, Docker runtime, region frankfurt, health `/api/config`.
 - 2026-05-17T01:45:00Z: Проект подготовлен к GitHub/Render: добавлены Dockerfile, .dockerignore, render.yaml, runtime data исключены из git; онлайн-версия использует Docker с ffmpeg, python3/Pillow и yt-dlp.
 - 2026-05-17T01:30:00Z: Финальная обложка собирается в два шага: бесплатная AI-модель генерирует фон без текста, затем Pillow локально накладывает крупный триггерный заголовок, контрастные плашки и затемняет/размывает зоны с возможным AI-псевдотекстом.
 - 2026-05-17T00:00:00Z: Обложки привязаны к описанию из транскрипта; добавлен free-only image-router `gemini -> cloudflare -> huggingface -> qwen -> pollinations` и учет `data/image-usage.json`.

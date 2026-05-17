@@ -1,9 +1,11 @@
 services:
   - type: web
-    name: auto-reels-pipeline
+    name: auto-reels-shtunda13
     runtime: docker
     plan: free
+    region: frankfurt
     autoDeploy: true
+    healthCheckPath: /api/config
     envVars:
       - key: NODE_ENV
         value: production

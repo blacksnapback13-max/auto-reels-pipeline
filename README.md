@@ -24,6 +24,18 @@ npm run dev
 http://127.0.0.1:3232
 ```
 
+Онлайн:
+
+```text
+https://auto-reels-shtunda13.onrender.com
+```
+
+GitHub:
+
+```text
+https://github.com/blacksnapback13-max/auto-reels-pipeline
+```
+
 ## Что уже умеет
 
 - принимает ссылку YouTube / youtu.be;
@@ -62,14 +74,18 @@ http://127.0.0.1:3232
 
 ## Онлайн-деплой
 
-Проект подготовлен для Render как Docker web service через `render.yaml`.
+Проект развернут на Render как Docker web service через GitHub.
 
-Render Blueprint:
+Render:
 
 ```text
+service: auto-reels-shtunda13
+url: https://auto-reels-shtunda13.onrender.com
+repo: https://github.com/blacksnapback13-max/auto-reels-pipeline
 runtime: docker
 plan: free
-start: npm start
+region: frankfurt
+health: /api/config
 ```
 
 Docker-образ внутри себя ставит `ffmpeg`, `ffprobe`, `python3`, `Pillow` и свежий `yt-dlp`, поэтому онлайн-версия запускает тот же пайплайн, что и локальная.
