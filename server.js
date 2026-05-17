@@ -41,6 +41,8 @@ const DEFAULT_POLLINATIONS_TIMEOUT_MS = Number(process.env.POLLINATIONS_TIMEOUT_
 const DEFAULT_POLLINATIONS_RETRY_ATTEMPTS = Number(process.env.POLLINATIONS_RETRY_ATTEMPTS || 3);
 const DEFAULT_POLLINATIONS_RETRY_DELAY_MS = Number(process.env.POLLINATIONS_RETRY_DELAY_MS || 4500);
 const DEFAULT_YTDLP_ANTIBOT_EXTRACTOR_ARGS = "youtube:player-skip=webpage,configs;player-client=default,mweb";
+const YTDLP_ANDROID_VR_EXTRACTOR_ARGS = "youtube:player-skip=webpage,configs;player-client=android_vr";
+const YTDLP_TV_EXTRACTOR_ARGS = "youtube:player-skip=webpage,configs;player-client=tv";
 const DEFAULT_BGUTIL_PROVIDER_HOME = "/opt/bgutil-ytdlp-pot-provider/server";
 const TOOLS_STATUS_CACHE_MS = Number(process.env.TOOLS_STATUS_CACHE_MS || 5 * 60 * 1000);
 const CRC32_TABLE = buildCrc32Table();
@@ -607,19 +609,30 @@ async function runYtDlp(job, args, options = {}) {
 
 function getYtDlpProfileAttempts(preferredProfile) {
   if (!isYtDlpAntiBotFallbackEnabled()) return [preferredProfile];
+  if (preferredProfile === "android-vr-no-cookies" || preferredProfile === "tv-no-cookies") return [preferredProfile];
   if (preferredProfile === "anti-bot-no-cookies") return ["anti-bot-no-cookies"];
   if (preferredProfile === "anti-bot") {
-    return isYtDlpAntiBotNoCookiesEnabled() ? ["anti-bot", "anti-bot-no-cookies"] : ["anti-bot"];
+    return isYtDlpAntiBotNoCookiesEnabled()
+      ? ["anti-bot", "anti-bot-no-cookies", "android-vr-no-cookies", "tv-no-cookies"]
+      : ["anti-bot"];
   }
   const profiles = ["standard", "anti-bot"];
-  if (isYtDlpAntiBotNoCookiesEnabled()) profiles.push("anti-bot-no-cookies");
+  if (isYtDlpAntiBotNoCookiesEnabled()) {
+    profiles.push("anti-bot-no-cookies", "android-vr-no-cookies", "tv-no-cookies");
+  }
   return profiles;
 }
 
 function describeYtDlpProfile(profile) {
+  if (profile === "android-vr-no-cookies") return "Android VR без cookies";
+  if (profile === "tv-no-cookies") return "TV без cookies";
   if (profile === "anti-bot-no-cookies") return "Innertube/mweb + POT без cookies";
   if (profile === "anti-bot") return "Innertube/mweb + POT";
   return "standard";
+}
+
+function shouldUseYtDlpCookies(profile) {
+  return !["anti-bot-no-cookies", "android-vr-no-cookies", "tv-no-cookies"].includes(profile);
 }
 
 function withYtDlpOptions(args, profile = "standard") {
@@ -633,7 +646,7 @@ function withYtDlpOptions(args, profile = "standard") {
   for (const header of getYtDlpAddHeaders()) {
     result.push("--add-header", header);
   }
-  if (cookies.configured && cookies.path && profile !== "anti-bot-no-cookies") {
+  if (cookies.configured && cookies.path && shouldUseYtDlpCookies(profile)) {
     result.push("--cookies", cookies.path);
   }
   for (const extractorArgs of getYtDlpExtractorArgs(profile)) {
@@ -657,6 +670,12 @@ function getYtDlpExtractorArgs(profile = "standard") {
   if ((profile === "anti-bot" || profile === "anti-bot-no-cookies") && !poToken && isYtDlpAntiBotFallbackEnabled()) {
     const fallback = String(process.env.YTDLP_ANTIBOT_EXTRACTOR_ARGS || DEFAULT_YTDLP_ANTIBOT_EXTRACTOR_ARGS).trim();
     if (fallback) values.push(fallback);
+  }
+  if (profile === "android-vr-no-cookies") {
+    values.push(YTDLP_ANDROID_VR_EXTRACTOR_ARGS);
+  }
+  if (profile === "tv-no-cookies") {
+    values.push(YTDLP_TV_EXTRACTOR_ARGS);
   }
   return values;
 }
@@ -755,6 +774,7 @@ function publicYtDlpAntiBotStatus() {
   return {
     fallbackEnabled: isYtDlpAntiBotFallbackEnabled(),
     noCookiesFallbackEnabled: isYtDlpAntiBotNoCookiesEnabled(),
+    noCookiesClients: isYtDlpAntiBotNoCookiesEnabled() ? ["mweb", "android_vr", "tv"] : [],
     extractorArgsConfigured: Boolean(String(process.env.YTDLP_EXTRACTOR_ARGS || "").trim()),
     poTokenConfigured: Boolean(String(process.env.YTDLP_PO_TOKEN || process.env.YTDLP_YOUTUBE_PO_TOKEN || "").trim()),
     bgutilPotProviderConfigured: Boolean(getBgutilPotProviderArgs()),
