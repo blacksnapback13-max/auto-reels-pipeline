@@ -40,7 +40,7 @@ const DEFAULT_POLLINATIONS_IMAGE_MODEL = process.env.POLLINATIONS_IMAGE_MODEL ||
 const DEFAULT_POLLINATIONS_TIMEOUT_MS = Number(process.env.POLLINATIONS_TIMEOUT_MS || 60000);
 const DEFAULT_POLLINATIONS_RETRY_ATTEMPTS = Number(process.env.POLLINATIONS_RETRY_ATTEMPTS || 3);
 const DEFAULT_POLLINATIONS_RETRY_DELAY_MS = Number(process.env.POLLINATIONS_RETRY_DELAY_MS || 4500);
-const DEFAULT_YTDLP_ANTIBOT_EXTRACTOR_ARGS = "youtube:player_skip=webpage,configs;player_client=default,mweb";
+const DEFAULT_YTDLP_ANTIBOT_EXTRACTOR_ARGS = "youtube:player-skip=webpage,configs;player-client=default,mweb";
 const DEFAULT_BGUTIL_PROVIDER_HOME = "/opt/bgutil-ytdlp-pot-provider/server";
 const TOOLS_STATUS_CACHE_MS = Number(process.env.TOOLS_STATUS_CACHE_MS || 5 * 60 * 1000);
 const CRC32_TABLE = buildCrc32Table();
