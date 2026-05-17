@@ -242,6 +242,8 @@ async function runJob(job) {
       "--dump-single-json",
       "--no-warnings",
       "--no-playlist",
+      "--skip-download",
+      "--no-check-formats",
       job.url
     ]), { cwd: job.dir, logStdout: false }, job);
     const metadata = JSON.parse(metadataRaw);
@@ -259,19 +261,7 @@ async function runJob(job) {
 
     await setStep(job, "download", "running");
     log(job, "Скачиваю видео");
-    await runCommand("yt-dlp", withYtDlpCookies([
-      "--no-playlist",
-      "--no-progress",
-      "--no-write-subs",
-      "--no-write-auto-subs",
-      "--merge-output-format",
-      "mp4",
-      "-f",
-      "bv*[height<=720]+ba/best[height<=720]/bv*+ba/best",
-      "-o",
-      "source.%(ext)s",
-      job.url
-    ]), { cwd: job.dir }, job);
+    await downloadSourceVideo(job);
 
     const mediaFile = await findMediaFile(job.dir);
     if (!mediaFile) {
@@ -455,6 +445,81 @@ async function downloadCaptionsBestEffort(job) {
   log(job, "YouTube captions сейчас недоступны, продолжу без транскрипта");
 }
 
+async function downloadSourceVideo(job) {
+  const attempts = [
+    {
+      label: "720p mp4 + audio",
+      format: "bv*[height<=720][ext=mp4]+ba[ext=m4a]/bv*[height<=720]+ba/best[height<=720]/best"
+    },
+    {
+      label: "best video + audio",
+      format: "bv*+ba/bestvideo+bestaudio/best"
+    },
+    {
+      label: "single best",
+      format: "best/b"
+    }
+  ];
+  const errors = [];
+
+  for (const [index, attempt] of attempts.entries()) {
+    if (index > 0) {
+      await cleanupSourceDownloadFiles(job.dir);
+      log(job, `Повторяю скачивание: ${attempt.label}`);
+    }
+    try {
+      await runCommand("yt-dlp", withYtDlpCookies([
+        "--no-playlist",
+        "--no-progress",
+        "--no-write-subs",
+        "--no-write-auto-subs",
+        "--no-check-formats",
+        "--merge-output-format",
+        "mp4",
+        "-f",
+        attempt.format,
+        "-o",
+        "source.%(ext)s",
+        job.url
+      ]), { cwd: job.dir }, job);
+      return;
+    } catch (error) {
+      errors.push(error);
+      log(job, `Формат ${attempt.label} не подошел: ${shortError(error)}`);
+      if (!isFormatUnavailableError(error) && !isYtDlpTransientFormatError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error(`yt-dlp не смог подобрать формат видео: ${combineShortErrors(errors)}`);
+}
+
+async function cleanupSourceDownloadFiles(dir) {
+  const entries = await fsp.readdir(dir, { withFileTypes: true }).catch(() => []);
+  await Promise.all(entries
+    .filter((entry) => entry.isFile() && /^source\./.test(entry.name) && !/\.(json3|vtt)$/i.test(entry.name))
+    .map((entry) => fsp.rm(path.join(dir, entry.name), { force: true }).catch(() => {})));
+}
+
+function isFormatUnavailableError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /requested format is not available|format .*not available|no video formats/i.test(message);
+}
+
+function isYtDlpTransientFormatError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /http error|download.*api page|unable to download|fragment|timeout|temporar/i.test(message);
+}
+
+function combineShortErrors(errors) {
+  return (errors || [])
+    .map((error) => shortError(error))
+    .filter(Boolean)
+    .slice(0, 3)
+    .join(" | ");
+}
+
 async function findMediaFile(dir) {
   const entries = await fsp.readdir(dir, { withFileTypes: true });
   const candidates = [];
@@ -511,8 +576,9 @@ function captionPreferenceScore(filename, preferred) {
 
 function withYtDlpCookies(args) {
   const cookies = getYtDlpCookiesStatus();
-  if (!cookies.configured || !cookies.path) return args;
-  return ["--cookies", cookies.path, ...args];
+  const baseArgs = ["--ignore-config"];
+  if (!cookies.configured || !cookies.path) return [...baseArgs, ...args];
+  return [...baseArgs, "--cookies", cookies.path, ...args];
 }
 
 function getYtDlpCookiesStatus() {

@@ -40,6 +40,7 @@ https://github.com/blacksnapback13-max/auto-reels-pipeline
 
 - принимает ссылку YouTube / youtu.be;
 - скачивает видео через `yt-dlp`;
+- если YouTube не отдает выбранный формат, автоматически пробует несколько fallback-вариантов: легкий 720p MP4, общий bestvideo+bestaudio и single best;
 - поддерживает YouTube browser cookies через секреты `YTDLP_COOKIES_BASE64`, `YTDLP_COOKIES_TEXT` или локальный `YTDLP_COOKIES_PATH`, чтобы обходить серверную проверку "Sign in to confirm you're not a bot";
 - скачивает доступные YouTube subtitles / auto-captions в `json3` или `vtt`;
 - выбирает несколько фрагментов по story-aware скорингу: крючок, поворот, вывод, естественная граница фразы;

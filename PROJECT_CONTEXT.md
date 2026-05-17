@@ -101,6 +101,7 @@
 
 ## История изменений
 
+- 2026-05-17T17:50:00Z: Добавлен fallback для `yt-dlp` formats: метаданные читаются с `--skip-download --no-check-formats`, скачивание пробует 720p MP4, затем bestvideo+bestaudio, затем single best.
 - 2026-05-17T17:35:00Z: Добавлена мобильная версия интерфейса: одно-колоночные формы/steps, крупные touch-кнопки, перенос длинных job/log/error строк, аккуратные карточки output/cover на 390px.
 - 2026-05-17T14:20:00Z: Добавлена поддержка YouTube cookies для Render: `YTDLP_COOKIES_BASE64`, `YTDLP_COOKIES_TEXT` и `YTDLP_COOKIES_PATH`; все вызовы `yt-dlp` используют `--cookies`, а ошибка anti-bot стала понятной в UI.
 - 2026-05-17T13:05:00Z: Добавлен опциональный persistent storage через Cloudinary: MP4, PNG-обложки, референс-кадры и `job.json` зеркалятся во внешнее хранилище при наличии `CLOUDINARY_URL`; ZIP умеет читать MP4 из удаленных URL.
