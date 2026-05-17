@@ -11,6 +11,8 @@ const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, "data");
 const JOBS_DIR = path.join(DATA_DIR, "jobs");
 loadEnvFile(path.join(ROOT, ".env"));
+const RUNTIME_DIR = path.join(DATA_DIR, "runtime");
+const YTDLP_COOKIES_RUNTIME_PATH = path.join(RUNTIME_DIR, "youtube-cookies.txt");
 const IMAGE_USAGE_PATH = path.join(DATA_DIR, "image-usage.json");
 const PORT = Number(process.env.PORT || 3232);
 const HOST = process.env.HOST || "127.0.0.1";
@@ -41,6 +43,7 @@ const DEFAULT_POLLINATIONS_RETRY_DELAY_MS = Number(process.env.POLLINATIONS_RETR
 const CRC32_TABLE = buildCrc32Table();
 let ffmpegFilterSupport = null;
 let captionRendererSupport = null;
+let ytdlpCookiesStatus = null;
 
 const STEP_DEFS = [
   ["metadata", "Метаданные YouTube"],
@@ -195,7 +198,7 @@ async function setStep(job, id, status, detail = "") {
 
 async function failJob(job, error) {
   job.status = "failed";
-  job.error = error instanceof Error ? error.message : String(error);
+  job.error = friendlyJobError(error);
   for (const step of job.steps) {
     if (step.status === "running") step.status = "failed";
   }
@@ -231,12 +234,16 @@ async function runJob(job) {
 
     await setStep(job, "metadata", "running");
     log(job, "Читаю метаданные YouTube");
-    const metadataRaw = await runCommand("yt-dlp", [
+    const cookieStatus = getYtDlpCookiesStatus();
+    if (cookieStatus.configured) {
+      log(job, `YouTube cookies: включены (${cookieStatus.source})`);
+    }
+    const metadataRaw = await runCommand("yt-dlp", withYtDlpCookies([
       "--dump-single-json",
       "--no-warnings",
       "--no-playlist",
       job.url
-    ], { cwd: job.dir, logStdout: false }, job);
+    ]), { cwd: job.dir, logStdout: false }, job);
     const metadata = JSON.parse(metadataRaw);
     job.metadata = {
       title: metadata.title || "YouTube video",
@@ -252,7 +259,7 @@ async function runJob(job) {
 
     await setStep(job, "download", "running");
     log(job, "Скачиваю видео");
-    await runCommand("yt-dlp", [
+    await runCommand("yt-dlp", withYtDlpCookies([
       "--no-playlist",
       "--no-progress",
       "--no-write-subs",
@@ -264,7 +271,7 @@ async function runJob(job) {
       "-o",
       "source.%(ext)s",
       job.url
-    ], { cwd: job.dir }, job);
+    ]), { cwd: job.dir }, job);
 
     const mediaFile = await findMediaFile(job.dir);
     if (!mediaFile) {
@@ -419,7 +426,7 @@ async function downloadCaptionsBestEffort(job) {
   for (const subLangs of attempts) {
     const before = await listCaptionFiles(job.dir);
     try {
-      await runCommand("yt-dlp", [
+      await runCommand("yt-dlp", withYtDlpCookies([
         "--no-playlist",
         "--no-progress",
         "--skip-download",
@@ -432,7 +439,7 @@ async function downloadCaptionsBestEffort(job) {
         "-o",
         "source.%(ext)s",
         job.url
-      ], { cwd: job.dir }, job);
+      ]), { cwd: job.dir }, job);
     } catch (error) {
       log(job, `Субтитры ${subLangs} не скачались: ${shortError(error)}`);
     }
@@ -500,6 +507,76 @@ function captionPreferenceScore(filename, preferred) {
     }
   }
   return 99;
+}
+
+function withYtDlpCookies(args) {
+  const cookies = getYtDlpCookiesStatus();
+  if (!cookies.configured || !cookies.path) return args;
+  return ["--cookies", cookies.path, ...args];
+}
+
+function getYtDlpCookiesStatus() {
+  if (ytdlpCookiesStatus) return ytdlpCookiesStatus;
+
+  const configuredPath = String(process.env.YTDLP_COOKIES_PATH || "").trim();
+  if (configuredPath) {
+    ytdlpCookiesStatus = {
+      configured: fs.existsSync(configuredPath),
+      source: "YTDLP_COOKIES_PATH",
+      path: configuredPath,
+      error: fs.existsSync(configuredPath) ? "" : "Файл cookies не найден"
+    };
+    return ytdlpCookiesStatus;
+  }
+
+  const rawBase64 = String(process.env.YTDLP_COOKIES_BASE64 || "").trim();
+  const rawText = process.env.YTDLP_COOKIES_TEXT;
+  if (!rawBase64 && !rawText) {
+    ytdlpCookiesStatus = {
+      configured: false,
+      source: "",
+      path: "",
+      error: ""
+    };
+    return ytdlpCookiesStatus;
+  }
+
+  try {
+    const decoded = rawBase64
+      ? Buffer.from(rawBase64, "base64").toString("utf8")
+      : String(rawText || "");
+    const cookiesText = decoded.replace(/\\n/g, "\n").trim();
+    if (!cookiesText || !/(youtube|google|Netscape HTTP Cookie File)/i.test(cookiesText)) {
+      throw new Error("значение не похоже на cookies.txt для YouTube");
+    }
+    fs.mkdirSync(RUNTIME_DIR, { recursive: true });
+    fs.writeFileSync(YTDLP_COOKIES_RUNTIME_PATH, `${cookiesText}\n`, {
+      mode: 0o600
+    });
+    ytdlpCookiesStatus = {
+      configured: true,
+      source: rawBase64 ? "YTDLP_COOKIES_BASE64" : "YTDLP_COOKIES_TEXT",
+      path: YTDLP_COOKIES_RUNTIME_PATH,
+      error: ""
+    };
+  } catch (error) {
+    ytdlpCookiesStatus = {
+      configured: false,
+      source: rawBase64 ? "YTDLP_COOKIES_BASE64" : "YTDLP_COOKIES_TEXT",
+      path: "",
+      error: shortError(error)
+    };
+  }
+  return ytdlpCookiesStatus;
+}
+
+function publicYtDlpCookiesStatus() {
+  const status = getYtDlpCookiesStatus();
+  return {
+    configured: Boolean(status.configured),
+    source: status.source || "",
+    error: status.error || ""
+  };
 }
 
 async function parseCaptionFile(file) {
@@ -1460,6 +1537,18 @@ function runCommand(command, args, options = {}, job = null) {
 function shortError(error) {
   const message = error instanceof Error ? error.message : String(error);
   return message.replace(/\s+/g, " ").slice(0, 320);
+}
+
+function friendlyJobError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (isYoutubeCookiesRequiredError(message)) {
+    return "YouTube попросил подтвердить, что запрос идет не от бота. Для Render нужно добавить browser cookies в секрет YTDLP_COOKIES_BASE64 или YTDLP_COOKIES_TEXT, после этого повторите сборку.";
+  }
+  return message;
+}
+
+function isYoutubeCookiesRequiredError(message) {
+  return /sign in to confirm you'?re not a bot|cookies-from-browser|pass cookies|exporting-youtube-cookies|confirm.*not a bot/i.test(String(message || ""));
 }
 
 function maskArg(arg) {
@@ -3366,6 +3455,9 @@ async function handleApi(req, res, pathname) {
       ok: true,
       port: PORT,
       storage: getPersistentStorageStatus(),
+      youtube: {
+        cookies: publicYtDlpCookiesStatus()
+      },
       coverGenerator: {
         ok: imageProviders.length > 0,
         provider: imageProviders[0] || "",

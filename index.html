@@ -745,14 +745,15 @@
         const captions = data.tools?.captionRenderer?.ok;
         const subtitles = data.tools?.ffmpeg?.filters?.subtitles;
         const storage = data.storage?.provider === "cloudinary" && data.storage?.ok ? " · Cloudinary" : "";
+        const youtubeCookies = data.youtube?.cookies?.configured ? " · YouTube cookies" : "";
         if (!coreOk) {
           toolStatus.textContent = "Нужно проверить инструменты";
         } else if (captions) {
-          toolStatus.textContent = `yt-dlp, ffmpeg готовы · trendy captions${storage}`;
+          toolStatus.textContent = `yt-dlp, ffmpeg готовы · trendy captions${storage}${youtubeCookies}`;
         } else if (!subtitles) {
-          toolStatus.textContent = `yt-dlp, ffmpeg готовы · без burned subtitles${storage}`;
+          toolStatus.textContent = `yt-dlp, ffmpeg готовы · без burned subtitles${storage}${youtubeCookies}`;
         } else {
-          toolStatus.textContent = `yt-dlp, ffmpeg готовы${storage}`;
+          toolStatus.textContent = `yt-dlp, ffmpeg готовы${storage}${youtubeCookies}`;
         }
         toolStatus.title = "";
       } catch (error) {

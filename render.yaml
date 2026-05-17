@@ -35,3 +35,5 @@ services:
         sync: false
       - key: CLOUDINARY_URL
         sync: false
+      - key: YTDLP_COOKIES_BASE64
+        sync: false

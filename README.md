@@ -40,6 +40,7 @@ https://github.com/blacksnapback13-max/auto-reels-pipeline
 
 - принимает ссылку YouTube / youtu.be;
 - скачивает видео через `yt-dlp`;
+- поддерживает YouTube browser cookies через секреты `YTDLP_COOKIES_BASE64`, `YTDLP_COOKIES_TEXT` или локальный `YTDLP_COOKIES_PATH`, чтобы обходить серверную проверку "Sign in to confirm you're not a bot";
 - скачивает доступные YouTube subtitles / auto-captions в `json3` или `vtt`;
 - выбирает несколько фрагментов по story-aware скорингу: крючок, поворот, вывод, естественная граница фразы;
 - отбрасывает клиффхэнгерные концовки и может слегка продлить фрагмент, если payoff идет сразу после мягкого лимита;
@@ -103,6 +104,14 @@ CLOUDINARY_FOLDER=auto-reels
 ```
 
 Опциональные бесплатные ключи добавляются в Render Dashboard как секреты: `GEMINI_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `HUGGINGFACE_API_KEY`, `DASHSCOPE_API_KEY`, `POLLINATIONS_API_KEY`.
+
+Если YouTube пишет `Sign in to confirm you're not a bot`, добавьте browser cookies в Render как секрет:
+
+```text
+YTDLP_COOKIES_BASE64=<base64 от cookies.txt>
+```
+
+`cookies.txt` должен быть в Netscape-формате из браузера, где YouTube уже открыт и аккаунт подтвержден. Секрет не логируется: приложение записывает его во временный файл `data/runtime/youtube-cookies.txt` и передает в `yt-dlp` как `--cookies`.
 
 Для постоянного хранения на бесплатном Render добавьте в секреты:
 

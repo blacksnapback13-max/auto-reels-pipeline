@@ -101,6 +101,7 @@
 
 ## История изменений
 
+- 2026-05-17T14:20:00Z: Добавлена поддержка YouTube cookies для Render: `YTDLP_COOKIES_BASE64`, `YTDLP_COOKIES_TEXT` и `YTDLP_COOKIES_PATH`; все вызовы `yt-dlp` используют `--cookies`, а ошибка anti-bot стала понятной в UI.
 - 2026-05-17T13:05:00Z: Добавлен опциональный persistent storage через Cloudinary: MP4, PNG-обложки, референс-кадры и `job.json` зеркалятся во внешнее хранилище при наличии `CLOUDINARY_URL`; ZIP умеет читать MP4 из удаленных URL.
 - 2026-05-17T12:24:08Z: GitHub repo создан и опубликован: `https://github.com/blacksnapback13-max/auto-reels-pipeline`; Render service `auto-reels-shtunda13` live на `https://auto-reels-shtunda13.onrender.com`, Docker runtime, region frankfurt, health `/api/config`.
 - 2026-05-17T01:45:00Z: Проект подготовлен к GitHub/Render: добавлены Dockerfile, .dockerignore, render.yaml, runtime data исключены из git; онлайн-версия использует Docker с ffmpeg, python3/Pillow и yt-dlp.
