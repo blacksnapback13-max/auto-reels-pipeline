@@ -1831,6 +1831,7 @@ function friendlyJobError(error) {
 function isYtDlpFallbackableError(error, profile) {
   if (isYoutubeCookiesRequiredError(error)) return true;
   if (isFormatUnavailableError(error) || isYtDlpTransientFormatError(error)) return true;
+  if (isYoutubeClientUnavailableError(error)) return true;
   if (!["anti-bot", "anti-bot-no-cookies"].includes(profile)) return false;
   return isYtDlpPotProviderError(error) || isCommandTimeoutError(error);
 }
@@ -1843,6 +1844,11 @@ function isYoutubeCookiesRequiredError(message) {
 function isYtDlpPotProviderError(message) {
   const value = message instanceof Error ? message.message : String(message || "");
   return /failed while generating pot|failed to generate an integrity token|generatePoToken|generateTokenMinter/i.test(value);
+}
+
+function isYoutubeClientUnavailableError(message) {
+  const value = message instanceof Error ? message.message : String(message || "");
+  return /watch video on youtube|error code:\s*152|this video is unavailable/i.test(value);
 }
 
 function isCommandTimeoutError(message) {
