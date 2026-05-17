@@ -1,4 +1,13 @@
-# Авто сборка рилсов
+# Авто сборка рилсов Онлайн
+
+Эта папка — онлайн-ветка проекта: GitHub + Render + локальный Mac-воркер для случаев,
+когда YouTube блокирует облачный IP.
+
+Стабильная оффлайн-версия сохранена отдельно и больше не трогается в рамках online-доработок:
+
+```text
+/Volumes/T eror/AI/Apps/Авто сборка рилсов Оффлайн
+```
 
 Локальный MVP пайплайна:
 
@@ -127,6 +136,27 @@ YTDLP_EXTRACTOR_ARGS=<ручные yt-dlp extractor args>
 
 Anti-bot fallback включен по умолчанию. Отключить его можно через `YTDLP_ANTIBOT_FALLBACK=false`, а заменить аргументы через `YTDLP_ANTIBOT_EXTRACTOR_ARGS`.
 Третий fallback без cookies для публичных видео включен через `YTDLP_ANTIBOT_NO_COOKIES=true`.
+
+## Локальный воркер для online
+
+Если Render получает YouTube anti-bot, online-задача переходит в статус “Ждёт Mac”.
+На Mac запустить:
+
+```bash
+npm run worker
+```
+
+Воркер читает локальный `.env.local-worker`:
+
+```text
+ONLINE_BASE_URL=https://auto-reels-shtunda13.onrender.com
+LOCAL_WORKER_TOKEN=тот-же-секрет-что-на-Render
+LOCAL_BASE_URL=http://127.0.0.1:3233
+YTDLP_COOKIES_FROM_BROWSER=chrome:Default
+```
+
+Он поднимает локальный pipeline на `127.0.0.1:3233`, забирает online-задачу,
+делает рилсы локально через browser cookies и загружает MP4 обратно в online job.
 
 Для постоянного хранения на бесплатном Render добавьте в секреты:
 

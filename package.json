@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js",
+    "worker": "node worker.js",
     "check": "node --check server.js"
   },
   "engines": {

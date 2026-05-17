@@ -225,7 +225,10 @@
     }
 
     .badge.running,
-    .badge.queued {
+    .badge.queued,
+    .badge.waiting_local_worker,
+    .badge.local_worker_running,
+    .badge.local_worker_uploading {
       background: #fff1cf;
       color: var(--warn);
     }
@@ -906,7 +909,7 @@
         if (data.job) {
           activeJobId = data.job.id;
           renderJob(data.job);
-          if (["queued", "running"].includes(data.job.status)) startPolling();
+          if (isActiveStatus(data.job.status)) startPolling();
         }
       } catch (error) {
         jobPanel.innerHTML = `<p class="error">${escapeHtml(errorMessage(error))}</p>`;
@@ -925,7 +928,7 @@
       const data = await response.json();
       if (data.job) {
         renderJob(data.job);
-        if (!["queued", "running"].includes(data.job.status)) {
+        if (!isActiveStatus(data.job.status)) {
           clearInterval(pollTimer);
         }
       }
@@ -1226,9 +1229,16 @@
       return {
         queued: "В очереди",
         running: "Работает",
+        waiting_local_worker: "Ждёт Mac",
+        local_worker_running: "Mac работает",
+        local_worker_uploading: "Mac грузит",
         done: "Готово",
         failed: "Ошибка"
       }[status] || status;
+    }
+
+    function isActiveStatus(status) {
+      return ["queued", "running", "waiting_local_worker", "local_worker_running", "local_worker_uploading"].includes(status);
     }
 
     function stepState(status) {

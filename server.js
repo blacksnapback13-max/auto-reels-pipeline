@@ -63,6 +63,7 @@ const DEFAULT_BGUTIL_PROVIDER_HOME = "/opt/bgutil-ytdlp-pot-provider/server";
 const YTDLP_METADATA_TIMEOUT_MS = readPositiveIntEnv("YTDLP_METADATA_TIMEOUT_MS", 90 * 1000);
 const YTDLP_DOWNLOAD_TIMEOUT_MS = readPositiveIntEnv("YTDLP_DOWNLOAD_TIMEOUT_MS", 10 * 60 * 1000);
 const COMMAND_KILL_GRACE_MS = readPositiveIntEnv("COMMAND_KILL_GRACE_MS", 5000);
+const LOCAL_WORKER_UPLOAD_LIMIT_BYTES = readPositiveIntEnv("LOCAL_WORKER_UPLOAD_LIMIT_MB", 300) * 1024 * 1024;
 const TOOLS_STATUS_CACHE_MS = Number(process.env.TOOLS_STATUS_CACHE_MS || 5 * 60 * 1000);
 const CRC32_TABLE = buildCrc32Table();
 let ffmpegFilterSupport = null;
@@ -232,12 +233,209 @@ async function setStep(job, id, status, detail = "") {
 }
 
 async function failJob(job, error) {
+  if (shouldQueueLocalWorker(job, error)) {
+    await queueLocalWorkerJob(job, error);
+    return;
+  }
+
   job.status = "failed";
   job.error = friendlyJobError(error);
   for (const step of job.steps) {
     if (step.status === "running") step.status = "failed";
   }
   log(job, `Ошибка: ${job.error}`);
+  await saveJob(job);
+}
+
+function shouldQueueLocalWorker(job, error) {
+  if (!isLocalWorkerQueueEnabled()) return false;
+  if (isLocalWorkerRuntime()) return false;
+  if (job.localWorker?.status) return false;
+  return isYoutubeCookiesRequiredError(error);
+}
+
+function isLocalWorkerQueueEnabled() {
+  if (String(process.env.LOCAL_WORKER_ENABLED || "true").trim().toLowerCase() === "false") return false;
+  return Boolean(getLocalWorkerToken());
+}
+
+function isLocalWorkerRuntime() {
+  return String(process.env.LOCAL_WORKER_DISABLE_QUEUE || "").trim().toLowerCase() === "true";
+}
+
+function getLocalWorkerToken() {
+  return String(process.env.LOCAL_WORKER_TOKEN || "").trim();
+}
+
+async function queueLocalWorkerJob(job, error) {
+  job.status = "waiting_local_worker";
+  job.error = "YouTube заблокировал облачный IP Render. Задача ждёт локальный воркер на Mac.";
+  for (const step of job.steps) {
+    if (step.status === "running") step.status = "queued";
+  }
+  job.localWorker = {
+    status: "waiting",
+    queuedAt: iso(),
+    reason: shortError(error),
+    syncedLogCount: 0
+  };
+  log(job, "Render упёрся в YouTube anti-bot, передаю задачу локальному воркеру");
+  await saveJob(job);
+}
+
+function authorizeLocalWorker(req, res) {
+  const token = getLocalWorkerToken();
+  if (!token) {
+    sendJson(res, 503, { error: "LOCAL_WORKER_TOKEN не настроен" });
+    return false;
+  }
+  const auth = String(req.headers.authorization || "");
+  const provided = auth.match(/^Bearer\s+(.+)$/i)?.[1] || "";
+  if (!safeTokenEqual(provided, token)) {
+    sendJson(res, 401, { error: "Нет доступа к local-worker API" });
+    return false;
+  }
+  return true;
+}
+
+function safeTokenEqual(left, right) {
+  const a = Buffer.from(String(left || ""));
+  const b = Buffer.from(String(right || ""));
+  return a.length === b.length && a.length > 0 && crypto.timingSafeEqual(a, b);
+}
+
+function findNextLocalWorkerJob() {
+  const staleMs = readPositiveIntEnv("LOCAL_WORKER_CLAIM_STALE_MS", 15 * 60 * 1000);
+  const now = Date.now();
+  return [...jobs.values()]
+    .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")))
+    .find((job) => {
+      if (job.status === "waiting_local_worker") return true;
+      if (job.status !== "local_worker_running") return false;
+      const claimedAt = Date.parse(job.localWorker?.claimedAt || "");
+      return !Number.isFinite(claimedAt) || now - claimedAt > staleMs;
+    }) || null;
+}
+
+async function claimLocalWorkerJob(job, workerId = "") {
+  job.status = "local_worker_running";
+  job.error = "Задачу обрабатывает локальный воркер на Mac.";
+  job.localWorker = {
+    ...(job.localWorker || {}),
+    status: "claimed",
+    claimedAt: iso(),
+    workerId: workerId || "local-worker"
+  };
+  log(job, `Локальный воркер забрал задачу${workerId ? `: ${workerId}` : ""}`);
+  await saveJob(job);
+}
+
+async function applyLocalWorkerManifest(job, workerJob) {
+  if (!workerJob || typeof workerJob !== "object") return;
+  const sourceId = String(workerJob.id || "");
+  job.metadata = workerJob.metadata || job.metadata;
+  job.source = workerJob.source || job.source;
+  job.transcript = workerJob.transcript || job.transcript;
+  job.segments = Array.isArray(workerJob.segments) ? workerJob.segments : job.segments;
+  job.render = workerJob.render || job.render;
+  job.renderProgress = workerJob.renderProgress || job.renderProgress;
+  if (Array.isArray(workerJob.steps)) {
+    job.steps = workerJob.steps.map((step, index) => ({
+      id: step.id || STEP_DEFS[index]?.[0] || `step-${index + 1}`,
+      label: step.label || STEP_DEFS[index]?.[1] || step.id || `Step ${index + 1}`,
+      status: step.status || "pending",
+      detail: step.detail || ""
+    }));
+  }
+  if (Array.isArray(workerJob.outputs)) {
+    job.outputs = workerJob.outputs.map((output) => rewriteLocalWorkerOutput(output, sourceId, job.id));
+  }
+  if (Array.isArray(workerJob.logs)) {
+    const marker = "[local]";
+    const existing = new Set(job.logs || []);
+    for (const line of workerJob.logs.slice(-MAX_LOGS)) {
+      const clean = `${marker} ${String(line)}`;
+      if (!existing.has(clean)) {
+        job.logs.push(clean);
+        existing.add(clean);
+      }
+    }
+    if (job.logs.length > MAX_LOGS) {
+      job.logs.splice(0, job.logs.length - MAX_LOGS);
+    }
+  }
+  job.localWorker = {
+    ...(job.localWorker || {}),
+    status: "syncing",
+    syncedAt: iso()
+  };
+  await saveJob(job);
+}
+
+function rewriteLocalWorkerOutput(output, sourceId, targetId) {
+  const next = { ...output };
+  for (const key of ["file", "localFile", "cover", "coverFile", "rawFile"]) {
+    if (typeof next[key] === "string") {
+      next[key] = rewriteLocalWorkerAssetPath(next[key], sourceId, targetId);
+    }
+  }
+  if (next.cover && typeof next.cover === "object") {
+    next.cover = rewriteLocalWorkerOutput(next.cover, sourceId, targetId);
+  }
+  return next;
+}
+
+function rewriteLocalWorkerAssetPath(value, sourceId, targetId) {
+  const text = String(value || "");
+  if (!text) return text;
+  if (sourceId && text.startsWith(`/jobs/${sourceId}/`)) {
+    return `/jobs/${targetId}/${text.slice(`/jobs/${sourceId}/`.length)}`;
+  }
+  return text.replace(/^\/jobs\/[^/]+\//, `/jobs/${targetId}/`);
+}
+
+function sanitizeWorkerAssetPath(value) {
+  const clean = String(value || "")
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "");
+  if (!clean || clean.includes("\0")) return "";
+  const normalized = path.posix.normalize(clean);
+  if (!normalized || normalized === "." || normalized.startsWith("../") || normalized.includes("/../")) return "";
+  if (!/\.(mp4|mov|m4v|webm|srt|vtt|json|png|jpg|jpeg)$/i.test(normalized)) return "";
+  return normalized;
+}
+
+async function markLocalWorkerComplete(job, workerJob = null) {
+  if (workerJob) {
+    await applyLocalWorkerManifest(job, workerJob);
+  }
+  job.status = "done";
+  job.error = null;
+  for (const step of job.steps) {
+    if (step.status !== "done") step.status = "done";
+  }
+  job.localWorker = {
+    ...(job.localWorker || {}),
+    status: "done",
+    completedAt: iso()
+  };
+  log(job, `Локальный воркер вернул результат: ${job.outputs.length} рилс(а/ов)`);
+  await saveJob(job);
+  await persistJobSnapshot(job);
+}
+
+async function markLocalWorkerFailed(job, error) {
+  job.status = "failed";
+  job.error = error || "Локальный воркер не смог завершить задачу";
+  for (const step of job.steps) {
+    if (step.status === "running" || step.status === "queued") step.status = "failed";
+  }
+  job.localWorker = {
+    ...(job.localWorker || {}),
+    status: "failed",
+    failedAt: iso()
+  };
+  log(job, `Локальный воркер вернул ошибку: ${job.error}`);
   await saveJob(job);
 }
 
@@ -691,6 +889,8 @@ function withYtDlpOptions(args, profile = "standard") {
   }
   if (cookies.configured && cookies.path && shouldUseYtDlpCookies(profile)) {
     result.push("--cookies", cookies.path);
+  } else if (cookies.configured && cookies.browser && shouldUseYtDlpCookies(profile)) {
+    result.push("--cookies-from-browser", cookies.browser);
   }
   for (const extractorArgs of getYtDlpExtractorArgs(profile)) {
     result.push("--extractor-args", extractorArgs);
@@ -771,11 +971,24 @@ function getYtDlpCookiesStatus() {
 
   const rawBase64 = String(process.env.YTDLP_COOKIES_BASE64 || "").trim();
   const rawText = process.env.YTDLP_COOKIES_TEXT;
-  if (!rawBase64 && !rawText) {
+  const browser = String(process.env.YTDLP_COOKIES_FROM_BROWSER || "").trim();
+  if (!rawBase64 && !rawText && !browser) {
     ytdlpCookiesStatus = {
       configured: false,
       source: "",
       path: "",
+      browser: "",
+      error: ""
+    };
+    return ytdlpCookiesStatus;
+  }
+
+  if (!rawBase64 && !rawText && browser) {
+    ytdlpCookiesStatus = {
+      configured: true,
+      source: "YTDLP_COOKIES_FROM_BROWSER",
+      path: "",
+      browser,
       error: ""
     };
     return ytdlpCookiesStatus;
@@ -797,6 +1010,7 @@ function getYtDlpCookiesStatus() {
       configured: true,
       source: rawBase64 ? "YTDLP_COOKIES_BASE64" : "YTDLP_COOKIES_TEXT",
       path: YTDLP_COOKIES_RUNTIME_PATH,
+      browser: "",
       error: ""
     };
   } catch (error) {
@@ -804,6 +1018,7 @@ function getYtDlpCookiesStatus() {
       configured: false,
       source: rawBase64 ? "YTDLP_COOKIES_BASE64" : "YTDLP_COOKIES_TEXT",
       path: "",
+      browser: "",
       error: shortError(error)
     };
   }
@@ -1932,11 +2147,23 @@ function loadEnvFile(filePath) {
 }
 
 async function readRequestBody(req) {
-  const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
-  const raw = Buffer.concat(chunks).toString("utf8");
+  const buffer = await readRequestBuffer(req, Number(process.env.JSON_BODY_LIMIT_BYTES || 10 * 1024 * 1024));
+  const raw = buffer.toString("utf8");
   if (!raw) return {};
   return JSON.parse(raw);
+}
+
+async function readRequestBuffer(req, limitBytes = 50 * 1024 * 1024) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of req) {
+    total += chunk.length;
+    if (total > limitBytes) {
+      throw new Error(`Request body is too large: limit ${limitBytes} bytes`);
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
 }
 
 function sendJson(res, status, payload) {
@@ -1971,7 +2198,7 @@ function corsHeaders() {
   return {
     "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET,POST,OPTIONS",
-    "access-control-allow-headers": "content-type"
+    "access-control-allow-headers": "content-type,authorization"
   };
 }
 
@@ -3804,6 +4031,111 @@ async function handleApi(req, res, pathname) {
       imageProviders: getEnabledImageProviders(),
       imageProviderUsage: getImageProviderUsageSummary()
     });
+    return;
+  }
+
+  if (req.method === "GET" && pathname === "/api/local-worker/jobs/next") {
+    if (!authorizeLocalWorker(req, res)) return;
+    const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+    const job = findNextLocalWorkerJob();
+    if (!job) {
+      sendJson(res, 200, { job: null });
+      return;
+    }
+    await claimLocalWorkerJob(job, url.searchParams.get("workerId") || "");
+    sendJson(res, 200, { job: publicJob(job) });
+    return;
+  }
+
+  const localWorkerMatch = pathname.match(/^\/api\/local-worker\/jobs\/([^/]+)\/(manifest|assets|complete|fail)$/);
+  if (localWorkerMatch) {
+    if (!authorizeLocalWorker(req, res)) return;
+    const [, id, action] = localWorkerMatch;
+    const job = jobs.get(id);
+    if (!job) {
+      sendJson(res, 404, { error: "Job not found" });
+      return;
+    }
+
+    try {
+      if (req.method === "POST" && action === "manifest") {
+        const body = await readRequestBody(req);
+        await applyLocalWorkerManifest(job, body.job);
+        sendJson(res, 200, { ok: true, job: publicJob(job) });
+        return;
+      }
+
+      if (req.method === "POST" && action === "assets") {
+        const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+        const relative = sanitizeWorkerAssetPath(url.searchParams.get("path"));
+        if (!relative) {
+          sendJson(res, 400, { error: "Invalid asset path" });
+          return;
+        }
+        const buffer = await readRequestBuffer(req, LOCAL_WORKER_UPLOAD_LIMIT_BYTES);
+        const filePath = path.resolve(job.dir, relative);
+        const jobRoot = path.resolve(job.dir);
+        if (!filePath.startsWith(`${jobRoot}${path.sep}`)) {
+          sendJson(res, 400, { error: "Invalid asset path" });
+          return;
+        }
+        await fsp.mkdir(path.dirname(filePath), { recursive: true });
+        await fsp.writeFile(filePath, buffer);
+
+        const index = Number.parseInt(url.searchParams.get("index") || "", 10);
+        if (Number.isInteger(index) && index >= 0) {
+          job.outputs[index] = job.outputs[index] || {
+            label: `Reel ${index + 1}`,
+            start: 0,
+            end: 0,
+            duration: 0,
+            score: 0,
+            reason: "local-worker",
+            captions: 0,
+            text: "",
+            description: ""
+          };
+          job.outputs[index].file = `/jobs/${job.id}/${relative}`;
+          job.outputs[index].localFile = `/jobs/${job.id}/${relative}`;
+          await persistJobAsset(job, job.outputs[index], {
+            localPath: filePath,
+            kind: "reel",
+            resourceType: "video",
+            mimeType: "video/mp4",
+            publicId: `${CLOUDINARY_FOLDER}/${job.id}/${relative.replace(/\.[^.]+$/, "")}`,
+            logLabel: `MP4 Reel ${index + 1}`
+          });
+        }
+
+        job.localWorker = {
+          ...(job.localWorker || {}),
+          status: "uploading",
+          uploadedAt: iso()
+        };
+        await saveJob(job);
+        sendJson(res, 200, { ok: true, file: `/jobs/${job.id}/${relative}` });
+        return;
+      }
+
+      if (req.method === "POST" && action === "complete") {
+        const body = await readRequestBody(req);
+        await markLocalWorkerComplete(job, body.job);
+        sendJson(res, 200, { ok: true, job: publicJob(job) });
+        return;
+      }
+
+      if (req.method === "POST" && action === "fail") {
+        const body = await readRequestBody(req);
+        await markLocalWorkerFailed(job, String(body.error || ""));
+        sendJson(res, 200, { ok: true, job: publicJob(job) });
+        return;
+      }
+    } catch (error) {
+      sendJson(res, 500, { error: error.message });
+      return;
+    }
+
+    sendJson(res, 405, { error: "Method not allowed" });
     return;
   }
 
