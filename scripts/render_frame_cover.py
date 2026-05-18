@@ -27,7 +27,10 @@ def load_font(size):
                 return ImageFont.truetype(candidate, size=size)
             except Exception:
                 continue
-    return ImageFont.load_default(size=size)
+    try:
+        return ImageFont.truetype("DejaVuSans-Bold.ttf", size=size)
+    except Exception:
+        return ImageFont.load_default()
 
 
 def normalize_text(text):

@@ -77,6 +77,8 @@ const REEL_HEIGHT = readEvenPositiveIntEnv("REEL_HEIGHT", IS_PRODUCTION ? 1280 :
 const REEL_BACKGROUND_MODE = normalizeReelBackgroundMode(process.env.REEL_BACKGROUND_MODE || (IS_PRODUCTION ? "crop" : "blur"));
 const REEL_VIDEO_PRESET = safeFfmpegToken(process.env.REEL_VIDEO_PRESET || (IS_PRODUCTION ? "ultrafast" : "veryfast"), IS_PRODUCTION ? "ultrafast" : "veryfast");
 const REEL_VIDEO_CRF = clampInt(process.env.REEL_VIDEO_CRF, 16, 35, IS_PRODUCTION ? 24 : 20);
+const REEL_SUBTITLE_FONT_SIZE = clampInt(process.env.REEL_SUBTITLE_FONT_SIZE, 8, 36, 9);
+const REEL_SUBTITLE_MARGIN_V = clampInt(process.env.REEL_SUBTITLE_MARGIN_V, 80, 520, 285);
 const TRENDY_CAPTIONS_ENABLED = readBooleanEnv("TRENDY_CAPTIONS_ENABLED", !IS_PRODUCTION);
 const TRENDY_CAPTION_MAX_OVERLAYS = clampInt(process.env.TRENDY_CAPTION_MAX_OVERLAYS, 8, 90, IS_PRODUCTION ? 28 : 90);
 const REEL_BLUR_STRENGTH = clampInt(process.env.REEL_BLUR_STRENGTH, 0, 40, 24);
@@ -128,7 +130,7 @@ function defaultOptions(input = {}) {
     language: normalizeLanguage(input.language),
     subtitles: input.subtitles !== false,
     uppercaseSubtitles: input.uppercaseSubtitles !== false,
-    cropMode: "fit-blur"
+    cropMode: normalizeReelBackgroundMode(input.cropMode || "fit-blur")
   };
 }
 
@@ -869,9 +871,11 @@ async function runJob(job) {
       video: {
         width: REEL_WIDTH,
         height: REEL_HEIGHT,
-        backgroundMode: REEL_BACKGROUND_MODE,
+        backgroundMode: job.options.cropMode || REEL_BACKGROUND_MODE,
         preset: REEL_VIDEO_PRESET,
-        crf: REEL_VIDEO_CRF
+        crf: REEL_VIDEO_CRF,
+        subtitleFontSize: REEL_SUBTITLE_FONT_SIZE,
+        subtitleMarginV: REEL_SUBTITLE_MARGIN_V
       },
       trendyCaptionsEnabled: TRENDY_CAPTIONS_ENABLED,
       trendyCaptionMaxOverlays: TRENDY_CAPTION_MAX_OVERLAYS
@@ -2500,17 +2504,18 @@ function readFfmpegProgressSeconds(state) {
   return 0;
 }
 
-function buildVerticalVideoFilters({ subtitleFilter, baseLabel }) {
+function buildVerticalVideoFilters({ subtitleFilter, baseLabel, backgroundMode = REEL_BACKGROUND_MODE }) {
   const width = REEL_WIDTH;
   const height = REEL_HEIGHT;
+  const mode = normalizeReelBackgroundMode(backgroundMode);
 
-  if (REEL_BACKGROUND_MODE === "crop") {
+  if (mode === "crop") {
     return [
       `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},setsar=1${subtitleFilter}[${baseLabel}]`
     ];
   }
 
-  if (REEL_BACKGROUND_MODE === "pad") {
+  if (mode === "pad") {
     return [
       `[0:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:${REEL_PAD_COLOR},setsar=1${subtitleFilter}[${baseLabel}]`
     ];
@@ -2534,7 +2539,7 @@ async function renderSegment({ job, input, output, srtName, captionOverlays = []
     reelTotal
   });
   const subtitleFilter = srtName
-    ? `,subtitles=filename='${srtName}':force_style='FontName=Helvetica,FontSize=18,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=165'`
+    ? `,subtitles=filename='${srtName}':force_style='FontName=Helvetica,FontSize=${REEL_SUBTITLE_FONT_SIZE},Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1,Shadow=0,Alignment=2,MarginV=${REEL_SUBTITLE_MARGIN_V}'`
     : "";
   const inputArgs = [
     "-ss",
@@ -2556,7 +2561,11 @@ async function renderSegment({ job, input, output, srtName, captionOverlays = []
   }
 
   const baseLabel = captionOverlays.length > 0 ? "base" : "v";
-  const filterParts = buildVerticalVideoFilters({ subtitleFilter, baseLabel });
+  const filterParts = buildVerticalVideoFilters({
+    subtitleFilter,
+    baseLabel,
+    backgroundMode: job.options?.cropMode || REEL_BACKGROUND_MODE
+  });
 
   let currentLabel = baseLabel;
   captionOverlays.forEach((caption, index) => {

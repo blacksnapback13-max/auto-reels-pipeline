@@ -838,8 +838,16 @@
 
           <label class="switch">
             <input id="subtitles" name="subtitles" type="checkbox" checked>
-            Добавлять трендовые субтитры
+            Добавлять субтитры
           </label>
+
+          <div class="field">
+            <label for="cropMode">Формат видео</label>
+            <select id="cropMode" name="cropMode">
+              <option value="fit-blur" selected>Как офлайн: видео целиком + фон</option>
+              <option value="crop">На весь экран</option>
+            </select>
+          </div>
 
           <button id="submitButton" type="submit">Собрать рилсы</button>
           <p class="hint">Для постоянных MP4 и обложек в online-режиме нужен Cloudinary.</p>
@@ -928,6 +936,7 @@
         language: payload.language || "auto",
         minDuration: payload.minDuration || "28",
         maxDuration: payload.maxDuration || "55",
+        cropMode: payload.cropMode || "fit-blur",
         subtitles: payload.subtitles ? "true" : "false"
       });
       return uploadVideoJob(`${API_BASE}/api/jobs/upload?${params.toString()}`, file);
