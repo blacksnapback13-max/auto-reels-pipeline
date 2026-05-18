@@ -77,6 +77,7 @@ const REEL_HEIGHT = readEvenPositiveIntEnv("REEL_HEIGHT", IS_PRODUCTION ? 1280 :
 const REEL_BACKGROUND_MODE = normalizeReelBackgroundMode(process.env.REEL_BACKGROUND_MODE || (IS_PRODUCTION ? "crop" : "blur"));
 const REEL_VIDEO_PRESET = safeFfmpegToken(process.env.REEL_VIDEO_PRESET || (IS_PRODUCTION ? "ultrafast" : "veryfast"), IS_PRODUCTION ? "ultrafast" : "veryfast");
 const REEL_VIDEO_CRF = clampInt(process.env.REEL_VIDEO_CRF, 16, 35, IS_PRODUCTION ? 24 : 20);
+const TRENDY_CAPTIONS_ENABLED = readBooleanEnv("TRENDY_CAPTIONS_ENABLED", !IS_PRODUCTION);
 const TRENDY_CAPTION_MAX_OVERLAYS = clampInt(process.env.TRENDY_CAPTION_MAX_OVERLAYS, 8, 90, IS_PRODUCTION ? 28 : 90);
 const REEL_BLUR_STRENGTH = clampInt(process.env.REEL_BLUR_STRENGTH, 0, 40, 24);
 const REEL_PAD_COLOR = sanitizeFfmpegColor(process.env.REEL_PAD_COLOR || "black");
@@ -104,6 +105,7 @@ const UPLOAD_STEP_DEFS = [
 ];
 
 const jobs = new Map();
+let jobQueueActive = false;
 
 function iso() {
   return new Date().toISOString();
@@ -139,6 +141,12 @@ function clampInt(value, min, max, fallback) {
 function readPositiveIntEnv(name, fallback) {
   const n = Number.parseInt(process.env[name] || "", 10);
   return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function readBooleanEnv(name, fallback = false) {
+  const value = process.env[name];
+  if (value === undefined || value === null || value === "") return fallback;
+  return !/^(false|0|no|off)$/i.test(String(value).trim());
 }
 
 function readEvenPositiveIntEnv(name, fallback) {
@@ -509,6 +517,30 @@ async function failJob(job, error) {
   await saveJob(job);
 }
 
+function enqueueJob(job) {
+  setImmediate(() => {
+    processJobQueue().catch((error) => {
+      console.error(`Job queue error: ${error.message || error}`);
+    });
+  });
+}
+
+async function processJobQueue() {
+  if (jobQueueActive) return;
+  jobQueueActive = true;
+  try {
+    while (true) {
+      const job = [...jobs.values()]
+        .filter((item) => item.status === "queued")
+        .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")))[0];
+      if (!job) return;
+      await runJob(job);
+    }
+  } finally {
+    jobQueueActive = false;
+  }
+}
+
 function shouldQueueLocalWorker(job, error) {
   if (!isLocalWorkerQueueEnabled()) return false;
   if (isLocalWorkerRuntime()) return false;
@@ -827,7 +859,7 @@ async function runJob(job) {
     await setStep(job, "render", "running");
     const filters = await getFfmpegFilterSupport().catch(() => ({ subtitles: false, drawtext: false }));
     const captionRenderer = await getCaptionRendererSupport().catch((error) => ({ ok: false, error: error.message }));
-    const canRenderImageCaptions = job.options.subtitles && cues.length > 0 && captionRenderer.ok;
+    const canRenderImageCaptions = job.options.subtitles && cues.length > 0 && TRENDY_CAPTIONS_ENABLED && captionRenderer.ok;
     const canBurnSubtitles = job.options.subtitles && cues.length > 0 && !canRenderImageCaptions && filters.subtitles;
     job.render = {
       subtitleMode: canRenderImageCaptions ? "trendy-image-overlays" : (canBurnSubtitles ? "ffmpeg-subtitles" : "none"),
@@ -841,12 +873,15 @@ async function runJob(job) {
         preset: REEL_VIDEO_PRESET,
         crf: REEL_VIDEO_CRF
       },
+      trendyCaptionsEnabled: TRENDY_CAPTIONS_ENABLED,
       trendyCaptionMaxOverlays: TRENDY_CAPTION_MAX_OVERLAYS
     };
     if (canRenderImageCaptions) {
       log(job, "Субтитры: трендовые PNG-оверлеи через Pillow");
     } else if (canBurnSubtitles) {
       log(job, "Субтитры: стандартный ffmpeg subtitles/libass");
+    } else if (job.options.subtitles && cues.length > 0 && !TRENDY_CAPTIONS_ENABLED && filters.subtitles) {
+      log(job, "Субтитры: PNG-оверлеи отключены для Render, использую SRT");
     } else if (job.options.subtitles && cues.length > 0) {
       log(job, "Субтитры не будут сожжены: нет Pillow-рендера и фильтра subtitles/libass");
     }
@@ -4970,7 +5005,7 @@ async function handleApi(req, res, pathname) {
       job.upload.bytes = bytes;
       log(job, `Загружен файл: ${originalName}, ${formatBytes(bytes)}`);
       await saveJob(job);
-      runJob(job);
+      enqueueJob(job);
       sendJson(res, 202, { job: publicJob(job) });
     } catch (error) {
       jobs.delete(job.id);
@@ -4991,7 +5026,7 @@ async function handleApi(req, res, pathname) {
     const job = createJob(url, defaultOptions(body));
     jobs.set(job.id, job);
     await saveJob(job);
-    runJob(job);
+    enqueueJob(job);
     sendJson(res, 202, { job: publicJob(job) });
     return;
   }
