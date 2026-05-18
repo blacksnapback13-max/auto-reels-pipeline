@@ -542,6 +542,16 @@
       background: #f6fbf8;
     }
 
+    .progress-panel.done {
+      border-color: rgba(31, 122, 77, 0.24);
+      background: #f3fbf6;
+    }
+
+    .progress-panel.failed {
+      border-color: rgba(179, 49, 49, 0.3);
+      background: #fff7f7;
+    }
+
     .progress-row {
       display: flex;
       align-items: center;
@@ -567,17 +577,19 @@
       transition: width 180ms ease;
     }
 
-    .logs {
-      border-top: 1px solid var(--line);
-      background: #22231f;
-      color: #e7e2d6;
-      max-height: 320px;
-      overflow: auto;
-      padding: 14px 16px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 12px;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
+    .progress-eta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .progress-eta strong {
+      display: block;
+      color: var(--text);
+      font-size: 14px;
     }
 
     .empty {
@@ -741,10 +753,8 @@
         padding: 12px;
       }
 
-      .logs {
-        max-height: 220px;
-        padding: 12px;
-        font-size: 11px;
+      .progress-eta {
+        grid-template-columns: 1fr;
       }
 
       .empty {
@@ -931,7 +941,7 @@
         xhr.setRequestHeader("content-type", file.type || "application/octet-stream");
         xhr.upload.onprogress = (event) => {
           const percent = event.lengthComputable ? Math.round((event.loaded / event.total) * 100) : 0;
-          jobPanel.innerHTML = `<p class="upload-progress">Загружаю видео${percent ? ` · ${percent}%` : ""}</p>`;
+          jobPanel.innerHTML = renderUploadProgress(percent);
         };
         xhr.onload = () => {
           const data = xhr.response || {};
@@ -1100,10 +1110,28 @@
         <div class="steps">
           ${(job.steps || []).map(renderStep).join("")}
         </div>
-        ${renderRenderProgress(job.renderProgress)}
+        ${renderJobProgress(job)}
         ${job.error ? `<p class="error">${escapeHtml(job.error)}</p>` : ""}
         ${outputs.length ? `<div class="outputs">${outputs.map((output, index) => renderOutput(output, index, job.id)).join("")}</div>` : `<div class="empty">Выходные видео появятся после рендера.</div>`}
-        <div class="logs">${escapeHtml((job.logs || []).slice(-120).join("\\n"))}</div>
+      `;
+    }
+
+    function renderUploadProgress(percent) {
+      const value = Math.max(0, Math.min(100, Number(percent) || 0));
+      return `
+        <div class="progress-panel">
+          <div class="progress-row">
+            <strong>Загружаю видео</strong>
+            <span>${Math.round(value)}%</span>
+          </div>
+          <div class="progress-bar">
+            <span class="progress-fill" style="width: ${value.toFixed(1)}%"></span>
+          </div>
+          <div class="progress-eta">
+            <span><strong>${value ? "меньше минуты" : "рассчитываю"}</strong>до начала обработки</span>
+            <span><strong>Файл отправляется на сервер</strong>текущий этап</span>
+          </div>
+        </div>
       `;
     }
 
@@ -1116,28 +1144,77 @@
       `;
     }
 
-    function renderRenderProgress(progress) {
+    function renderJobProgress(job) {
+      const progress = job.progress || deriveProgress(job);
       if (!progress) return "";
       const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
       const rounded = Math.round(percent);
-      const status = progress.status === "done" ? "готово" : (progress.status === "starting" ? "старт" : "рендер");
-      const label = `Reel ${progress.reel || 1} из ${progress.total || 1}`;
-      const timing = progress.duration
-        ? `${progress.outTime || "0:00"} / ${progress.duration}`
-        : (progress.outTime || "0:00");
-      const metrics = [progress.file, status, timing, progress.speed].filter(Boolean).join(" · ");
+      const panelState = job.status === "done" ? "done" : (job.status === "failed" ? "failed" : "");
+      const eta = job.status === "done"
+        ? "готово"
+        : (job.status === "failed" ? "остановлено" : (progress.etaText || formatEta(progress.etaSeconds)));
+      const etaCaption = isActiveStatus(job.status) ? "до готовности" : "статус";
+      const detail = progress.detail || renderProgressDetail(job.renderProgress) || "Готовлю задачу";
       return `
-        <div class="progress-panel">
+        <div class="progress-panel ${panelState}">
           <div class="progress-row">
-            <strong>${escapeHtml(label)}</strong>
+            <strong>${escapeHtml(progress.label || "Прогресс")}</strong>
             <span>${rounded}%</span>
           </div>
           <div class="progress-bar">
             <span class="progress-fill" style="width: ${percent.toFixed(1)}%"></span>
           </div>
-          <p class="output-copy">${escapeHtml(metrics)}</p>
+          <div class="progress-eta">
+            <span><strong>${escapeHtml(eta)}</strong>${escapeHtml(etaCaption)}</span>
+            <span><strong>${escapeHtml(detail)}</strong>текущий этап</span>
+          </div>
         </div>
       `;
+    }
+
+    function deriveProgress(job) {
+      if (job.status === "done") {
+        return { percent: 100, etaSeconds: 0, etaText: "готово", label: "Рилсы готовы", detail: `${job.outputs?.length || 0} MP4 готово` };
+      }
+      if (job.status === "failed") {
+        return { percent: 0, etaSeconds: null, etaText: "", label: "Остановлено с ошибкой", detail: "Нужно перезапустить задачу" };
+      }
+      const render = job.renderProgress;
+      if (render) {
+        return {
+          percent: Number(render.overallPercent ?? render.percent) || 0,
+          etaSeconds: render.overallEtaSeconds ?? render.etaSeconds ?? null,
+          etaText: "",
+          label: "Рендерю вертикальные рилсы",
+          detail: renderProgressDetail(render)
+        };
+      }
+      return { percent: 8, etaSeconds: null, etaText: "рассчитываю", label: "Готовлю задачу", detail: "" };
+    }
+
+    function renderProgressDetail(progress) {
+      if (!progress) return "";
+      const timing = progress.duration
+        ? `${progress.outTime || "0:00"} / ${progress.duration}`
+        : (progress.outTime || "");
+      return [
+        progress.file,
+        progress.reel && progress.total ? `Reel ${progress.reel} из ${progress.total}` : "",
+        timing,
+        progress.speed
+      ].filter(Boolean).join(" · ");
+    }
+
+    function formatEta(seconds) {
+      const value = Number(seconds);
+      if (!Number.isFinite(value)) return "рассчитываю";
+      if (value <= 0) return "готово";
+      if (value < 45) return "меньше минуты";
+      const minutes = Math.ceil(value / 60);
+      if (minutes < 60) return `примерно ${minutes} мин`;
+      const hours = Math.floor(minutes / 60);
+      const rest = minutes % 60;
+      return rest ? `примерно ${hours} ч ${rest} мин` : `примерно ${hours} ч`;
     }
 
     function getCoverSettings(key) {

@@ -9,6 +9,12 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 
 FONT_CANDIDATES = [
+    os.environ.get("CAPTION_FONT_PATH", ""),
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
     "/System/Library/Fonts/Supplemental/Arial.ttf",
     "/System/Library/Fonts/Helvetica.ttc",
@@ -19,12 +25,20 @@ FONT_CANDIDATES = [
 
 def load_font(size):
     for candidate in FONT_CANDIDATES:
-        if os.path.exists(candidate):
+        if candidate and os.path.exists(candidate):
             try:
                 return ImageFont.truetype(candidate, size=size)
             except Exception:
                 continue
-    return ImageFont.load_default(size=size)
+    for family in ("DejaVuSans-Bold.ttf", "Arial.ttf"):
+        try:
+            return ImageFont.truetype(family, size=size)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
 
 
 def text_size(draw, text, font, stroke_width=0):

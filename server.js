@@ -311,6 +311,7 @@ function createJob(url, options, input = {}) {
 function publicJob(job) {
   return {
     ...job,
+    progress: buildJobProgress(job),
     outputs: (job.outputs || []).map((output) => {
       const generatedDescription = generateReelDescription(output);
       return {
@@ -320,6 +321,150 @@ function publicJob(job) {
     }),
     dir: job.dir
   };
+}
+
+function buildJobProgress(job) {
+  if (job.status === "done") {
+    return {
+      percent: 100,
+      etaSeconds: 0,
+      etaText: "готово",
+      label: "Рилсы готовы",
+      detail: `${(job.outputs || []).length} MP4 готово`
+    };
+  }
+
+  const percent = estimateJobPercent(job);
+  if (job.status === "failed") {
+    return {
+      percent,
+      etaSeconds: null,
+      etaText: "",
+      label: "Остановлено с ошибкой",
+      detail: "Можно исправить причину и запустить задачу заново"
+    };
+  }
+
+  const etaSeconds = estimateJobEtaSeconds(job, percent);
+  return {
+    percent,
+    etaSeconds,
+    etaText: formatEtaText(etaSeconds),
+    label: currentJobProgressLabel(job),
+    detail: currentJobProgressDetail(job)
+  };
+}
+
+function estimateJobPercent(job) {
+  if (!job || job.status === "queued") return 1;
+  const weights = { metadata: 8, download: 28, analyze: 12, render: 52 };
+  let percent = 0;
+
+  for (const step of job.steps || []) {
+    const weight = weights[step.id] || 0;
+    if (step.status === "done") {
+      percent += weight;
+    } else if (step.status === "running") {
+      percent += weight * activeStepFraction(job, step.id);
+    }
+  }
+
+  if ((job.outputs || []).length > 0 && (job.segments || []).length > 0) {
+    const rendered = Math.min(1, (job.outputs || []).length / Math.max(1, (job.segments || []).length));
+    percent = Math.max(percent, weights.metadata + weights.download + weights.analyze + weights.render * rendered);
+  }
+
+  return round2(Math.max(1, Math.min(job.status === "done" ? 100 : 99, percent)));
+}
+
+function activeStepFraction(job, stepId) {
+  if (stepId === "download") {
+    if (job.asr?.status === "running" && Number(job.asr.chunks) > 0) {
+      return Math.min(0.95, 0.25 + 0.7 * (Number(job.asr.completedChunks || 0) / Number(job.asr.chunks)));
+    }
+    if (["done", "empty"].includes(job.asr?.status)) return 0.95;
+    return 0.45;
+  }
+
+  if (stepId === "render") {
+    const total = Math.max(1, Number((job.segments || []).length || job.renderProgress?.total || 1));
+    if (Number.isFinite(Number(job.renderProgress?.overallPercent))) {
+      return Math.max(0, Math.min(1, Number(job.renderProgress.overallPercent) / 100));
+    }
+    return Math.max(0, Math.min(1, Number((job.outputs || []).length || 0) / total));
+  }
+
+  if (stepId === "metadata") return 0.55;
+  if (stepId === "analyze") return 0.5;
+  return 0.4;
+}
+
+function currentJobProgressLabel(job) {
+  const runningStep = (job.steps || []).find((step) => step.status === "running");
+  if (job.status === "queued") return "Задача в очереди";
+  if (job.asr?.status === "running") return "Распознаю речь и готовлю субтитры";
+  if (runningStep?.id === "metadata") return "Проверяю видео";
+  if (runningStep?.id === "download") return isUploadJob(job) ? "Готовлю загруженный файл" : "Скачиваю видео";
+  if (runningStep?.id === "analyze") return "Ищу сильные фрагменты";
+  if (runningStep?.id === "render") return "Рендерю вертикальные рилсы";
+  return "Готовлю задачу";
+}
+
+function currentJobProgressDetail(job) {
+  if (job.asr?.status === "running") {
+    return `ASR ${Number(job.asr.completedChunks || 0)} из ${Number(job.asr.chunks || 0)} фрагментов`;
+  }
+  const render = job.renderProgress;
+  if (render) {
+    const parts = [
+      render.file || `Reel ${render.reel || 1}`,
+      render.reel && render.total ? `рилс ${render.reel} из ${render.total}` : "",
+      render.outTime && render.duration ? `${render.outTime} / ${render.duration}` : "",
+      render.speed || ""
+    ];
+    return parts.filter(Boolean).join(" · ");
+  }
+  const runningStep = (job.steps || []).find((step) => step.status === "running");
+  return runningStep?.label || "";
+}
+
+function estimateJobEtaSeconds(job, percent) {
+  if (job.status === "done") return 0;
+  if (job.status === "failed") return null;
+
+  const renderEta = firstFiniteNonNegative(job.renderProgress?.overallEtaSeconds, job.renderProgress?.etaSeconds);
+  if (renderEta !== null) return Math.round(renderEta);
+
+  const asrEta = firstFiniteNonNegative(job.asr?.etaSeconds);
+  if (job.asr?.status === "running" && asrEta !== null) return Math.round(asrEta);
+
+  const startedAt = Date.parse(job.createdAt || "");
+  if (!startedAt || percent < 4) return null;
+  const elapsed = Math.max(1, (Date.now() - startedAt) / 1000);
+  const eta = elapsed * ((100 - percent) / Math.max(1, percent));
+  if (!Number.isFinite(eta) || eta < 0 || eta > 12 * 60 * 60) return null;
+  return Math.round(eta);
+}
+
+function firstFiniteNonNegative(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined || value === "") continue;
+    const number = Number(value);
+    if (Number.isFinite(number) && number >= 0) return number;
+  }
+  return null;
+}
+
+function formatEtaText(seconds) {
+  if (!Number.isFinite(Number(seconds))) return "рассчитываю";
+  const value = Math.max(0, Number(seconds));
+  if (value <= 0) return "готово";
+  if (value < 45) return "меньше минуты";
+  const minutes = Math.ceil(value / 60);
+  if (minutes < 60) return `примерно ${minutes} мин`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `примерно ${hours} ч ${rest} мин` : `примерно ${hours} ч`;
 }
 
 async function saveJob(job) {
@@ -706,6 +851,7 @@ async function runJob(job) {
 
     const outputDir = path.join(job.dir, "outputs");
     await fsp.mkdir(outputDir, { recursive: true });
+    job.renderStartedAt = iso();
     for (let index = 0; index < job.segments.length; index += 1) {
       const segment = job.segments[index];
       const outputName = `reel-${index + 1}.mp4`;
@@ -734,7 +880,13 @@ async function runJob(job) {
         file: outputName,
         status: "starting",
         percent: 0,
+        overallPercent: round2((index / Math.max(1, job.segments.length)) * 100),
         outTime: "0:00",
+        duration: formatClock(segment.duration),
+        seconds: 0,
+        durationSeconds: round2(segment.duration),
+        etaSeconds: null,
+        overallEtaSeconds: null,
         speed: ""
       };
       await renderSegment({
@@ -755,7 +907,13 @@ async function runJob(job) {
         file: outputName,
         status: "done",
         percent: 100,
+        overallPercent: round2(((index + 1) / Math.max(1, job.segments.length)) * 100),
         outTime: formatClock(segment.duration),
+        duration: formatClock(segment.duration),
+        seconds: round2(segment.duration),
+        durationSeconds: round2(segment.duration),
+        etaSeconds: 0,
+        overallEtaSeconds: index + 1 >= job.segments.length ? 0 : null,
         speed: ""
       };
 
@@ -845,8 +1003,12 @@ async function transcribeUploadedVideoBestEffort(job, mediaFile, probe) {
   const chunks = buildAsrChunks(duration);
   const cues = [];
   const textParts = [];
+  const asrStartedAt = Date.now();
   job.asr.status = "running";
   job.asr.chunks = chunks.length;
+  job.asr.completedChunks = 0;
+  job.asr.percent = 0;
+  job.asr.startedAt = iso();
   await saveJob(job);
   log(job, `ASR Cloudflare: ${chunks.length} аудио-фрагмент(а/ов) по ${ASR_CHUNK_SECONDS} сек`);
 
@@ -864,12 +1026,22 @@ async function transcribeUploadedVideoBestEffort(job, mediaFile, probe) {
     } finally {
       await fsp.rm(audioPath, { force: true }).catch(() => {});
     }
+    const completedChunks = index + 1;
+    const elapsed = Math.max(1, (Date.now() - asrStartedAt) / 1000);
+    job.asr.completedChunks = completedChunks;
+    job.asr.percent = round2((completedChunks / chunks.length) * 100);
+    job.asr.etaSeconds = Math.max(0, Math.round((elapsed / completedChunks) * (chunks.length - completedChunks)));
+    await saveJob(job);
   }
 
   const compacted = compactCues(cues.sort((a, b) => a.start - b.start));
   if (compacted.length === 0) {
     job.asr.status = "empty";
     job.asr.cues = 0;
+    job.asr.completedChunks = chunks.length;
+    job.asr.percent = 100;
+    job.asr.etaSeconds = 0;
+    job.asr.finishedAt = iso();
     log(job, "ASR не вернул распознаваемый текст, продолжу без транскрипта");
     await saveJob(job);
     return;
@@ -910,6 +1082,10 @@ async function transcribeUploadedVideoBestEffort(job, mediaFile, probe) {
   job.asr.file = transcriptName;
   job.asr.vtt = transcriptAsset.file;
   job.asr.text = textAsset.file;
+  job.asr.completedChunks = chunks.length;
+  job.asr.percent = 100;
+  job.asr.etaSeconds = 0;
+  job.asr.finishedAt = iso();
   job.asr.storage = {
     vtt: transcriptAsset.storage || null,
     text: textAsset.storage || null
@@ -2171,6 +2347,7 @@ function createFfmpegProgressHandler(job, { duration, outputName, reelNumber, re
   const state = {};
   let nextLogPercent = 10;
   let loggedDone = false;
+  const renderStartedAt = Date.now();
 
   return (line) => {
     const match = String(line || "").trim().match(/^([^=]+)=(.*)$/);
@@ -2188,6 +2365,36 @@ function createFfmpegProgressHandler(job, { duration, outputName, reelNumber, re
     const rawPercent = duration > 0 ? (seconds / duration) * 100 : 0;
     const percent = done ? 100 : Math.min(99.5, Math.max(0, rawPercent));
     const speed = state.speed && state.speed !== "N/A" ? state.speed.trim() : "";
+    const speedMultiplier = parseFfmpegSpeed(speed);
+    const futureDuration = (job.segments || [])
+      .slice(Math.max(0, reelNumber))
+      .reduce((sum, segment) => sum + Math.max(0, Number(segment.duration || (segment.end - segment.start)) || 0), 0);
+    const remainingVideoSeconds = Math.max(0, duration - seconds) + futureDuration;
+    const elapsed = Math.max(1, (Date.now() - renderStartedAt) / 1000);
+    const overallStartedAt = Date.parse(job.renderStartedAt || job.createdAt || "");
+    const overallElapsed = Number.isFinite(overallStartedAt)
+      ? Math.max(1, (Date.now() - overallStartedAt) / 1000)
+      : elapsed;
+    const etaSeconds = done ? 0 : estimateRemainingSeconds({
+      remainingWork: Math.max(0, duration - seconds),
+      completedWork: Math.max(0, seconds),
+      elapsed,
+      speedMultiplier
+    });
+    const overallEtaSeconds = done && reelNumber >= reelTotal
+      ? 0
+      : estimateRemainingSeconds({
+        remainingWork: remainingVideoSeconds,
+        completedWork: (job.segments || [])
+          .slice(0, Math.max(0, reelNumber - 1))
+          .reduce((sum, segment) => sum + Math.max(0, Number(segment.duration || (segment.end - segment.start)) || 0), 0) + Math.max(0, seconds),
+        elapsed: overallElapsed,
+        speedMultiplier
+      });
+    const segmentFraction = duration > 0 ? percent / 100 : 0;
+    const overallPercent = reelTotal > 0
+      ? Math.min(100, Math.max(0, ((reelNumber - 1 + segmentFraction) / reelTotal) * 100))
+      : percent;
 
     job.renderProgress = {
       reel: reelNumber,
@@ -2195,8 +2402,13 @@ function createFfmpegProgressHandler(job, { duration, outputName, reelNumber, re
       file: outputName,
       status: done ? "done" : "running",
       percent: round2(percent),
+      overallPercent: round2(overallPercent),
       outTime: formatClock(seconds),
       duration: formatClock(duration),
+      seconds: round2(seconds),
+      durationSeconds: round2(duration),
+      etaSeconds,
+      overallEtaSeconds,
       frame: state.frame || "",
       fps: state.fps || "",
       speed
@@ -2212,6 +2424,21 @@ function createFfmpegProgressHandler(job, { duration, outputName, reelNumber, re
       loggedDone = true;
     }
   };
+}
+
+function parseFfmpegSpeed(value) {
+  const match = String(value || "").match(/([0-9]*\.?[0-9]+)x/i);
+  const speed = match ? Number(match[1]) : 0;
+  return Number.isFinite(speed) && speed > 0 ? speed : 0;
+}
+
+function estimateRemainingSeconds({ remainingWork, completedWork, elapsed, speedMultiplier }) {
+  if (remainingWork <= 0) return 0;
+  if (speedMultiplier > 0) return Math.max(0, Math.round(remainingWork / speedMultiplier));
+  if (completedWork > 0 && elapsed > 0) {
+    return Math.max(0, Math.round((elapsed / completedWork) * remainingWork));
+  }
+  return null;
 }
 
 function readFfmpegProgressSeconds(state) {
@@ -2480,6 +2707,14 @@ function friendlyJobError(error) {
   const message = error instanceof Error ? error.message : String(error);
   if (isYoutubeCookiesRequiredError(message)) {
     return "YouTube попросил подтвердить, что запрос идет не от бота. Cookies подключены, но облачный IP Render может требовать свежие browser cookies из приватного окна, PO-token (YTDLP_PO_TOKEN/YTDLP_EXTRACTOR_ARGS) или прокси (YTDLP_PROXY).";
+  }
+  if (/render_trendy_captions\.py|load_default\(\).*unexpected keyword argument 'size'|Pillow/i.test(message)) {
+    const lastLine = message.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).at(-1) || "";
+    return `Не удалось наложить трендовые субтитры. Обновите задачу после правки renderer${lastLine ? `: ${lastLine}` : "."}`;
+  }
+  if (/Traceback \(most recent call last\)/i.test(message)) {
+    const lastLine = message.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).at(-1);
+    return lastLine || "Внутренний скрипт остановился с ошибкой.";
   }
   return message;
 }
