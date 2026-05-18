@@ -77,6 +77,7 @@ const REEL_HEIGHT = readEvenPositiveIntEnv("REEL_HEIGHT", IS_PRODUCTION ? 1280 :
 const REEL_BACKGROUND_MODE = normalizeReelBackgroundMode(process.env.REEL_BACKGROUND_MODE || (IS_PRODUCTION ? "crop" : "blur"));
 const REEL_VIDEO_PRESET = safeFfmpegToken(process.env.REEL_VIDEO_PRESET || (IS_PRODUCTION ? "ultrafast" : "veryfast"), IS_PRODUCTION ? "ultrafast" : "veryfast");
 const REEL_VIDEO_CRF = clampInt(process.env.REEL_VIDEO_CRF, 16, 35, IS_PRODUCTION ? 24 : 20);
+const TRENDY_CAPTION_MAX_OVERLAYS = clampInt(process.env.TRENDY_CAPTION_MAX_OVERLAYS, 8, 90, IS_PRODUCTION ? 28 : 90);
 const REEL_BLUR_STRENGTH = clampInt(process.env.REEL_BLUR_STRENGTH, 0, 40, 24);
 const REEL_PAD_COLOR = sanitizeFfmpegColor(process.env.REEL_PAD_COLOR || "black");
 const TOOLS_STATUS_CACHE_MS = Number(process.env.TOOLS_STATUS_CACHE_MS || 5 * 60 * 1000);
@@ -839,7 +840,8 @@ async function runJob(job) {
         backgroundMode: REEL_BACKGROUND_MODE,
         preset: REEL_VIDEO_PRESET,
         crf: REEL_VIDEO_CRF
-      }
+      },
+      trendyCaptionMaxOverlays: TRENDY_CAPTION_MAX_OVERLAYS
     };
     if (canRenderImageCaptions) {
       log(job, "Субтитры: трендовые PNG-оверлеи через Pillow");
@@ -858,16 +860,25 @@ async function runJob(job) {
       const srtName = `reel-${index + 1}.srt`;
       const outputPath = path.join("outputs", outputName);
       const absoluteOutput = path.join(job.dir, outputPath);
+      let segmentSrtName = canBurnSubtitles ? srtName : null;
       let captionOverlays = [];
 
       if (canRenderImageCaptions) {
-        captionOverlays = await buildTrendyCaptionAssets({
-          job,
-          segment,
-          cues,
-          options: job.options,
-          reelIndex: index
-        });
+        const trendyCaptionCount = buildTrendyCaptionChunks(segment, cues, job.options).length;
+        if (trendyCaptionCount > TRENDY_CAPTION_MAX_OVERLAYS && filters.subtitles) {
+          const srt = buildSrtForSegment(segment, cues, job.options);
+          await fsp.writeFile(path.join(job.dir, srtName), srt || "");
+          segmentSrtName = srtName;
+          log(job, `Субтитры ${outputName}: ${trendyCaptionCount} PNG-оверлеев слишком много для Render, использую SRT`);
+        } else {
+          captionOverlays = await buildTrendyCaptionAssets({
+            job,
+            segment,
+            cues,
+            options: job.options,
+            reelIndex: index
+          });
+        }
       } else if (canBurnSubtitles) {
         const srt = buildSrtForSegment(segment, cues, job.options);
         await fsp.writeFile(path.join(job.dir, srtName), srt || "");
@@ -893,7 +904,7 @@ async function runJob(job) {
         job,
         input: mediaFile,
         output: absoluteOutput,
-        srtName: canBurnSubtitles ? srtName : null,
+        srtName: segmentSrtName,
         captionOverlays,
         segment,
         index,
