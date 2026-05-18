@@ -23,6 +23,12 @@ services:
         value: auto-reels
       - key: UPLOAD_VIDEO_LIMIT_MB
         value: "700"
+      - key: ASR_PROVIDER
+        value: auto
+      - key: CLOUDFLARE_ASR_MODEL
+        value: "@cf/openai/whisper"
+      - key: ASR_CHUNK_SECONDS
+        value: "55"
       - key: REEL_WIDTH
         value: "720"
       - key: REEL_HEIGHT

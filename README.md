@@ -16,6 +16,12 @@
 uploaded video -> ffprobe -> timing/story clips -> trendy captions when transcript exists -> ffmpeg -> vertical reels
 ```
 
+Если подключен Cloudflare Workers AI, uploaded video сначала проходит ASR:
+
+```text
+uploaded video -> ffmpeg audio chunks -> Cloudflare Whisper -> source.asr.vtt -> story-aware clips -> trendy captions
+```
+
 Запасной YouTube-пайплайн:
 
 ```text
@@ -56,6 +62,7 @@ https://github.com/blacksnapback13-max/auto-reels-pipeline
 
 - принимает готовый видеофайл `MP4`, `MOV`, `M4V`, `WEBM` или `MKV` через `/api/jobs/upload`;
 - для загруженного файла полностью работает на Render без Mac и без YouTube anti-bot;
+- для загруженного файла умеет делать ASR-транскрибацию через Cloudflare Workers AI Whisper и затем резать уже по тексту;
 - принимает ссылку YouTube / youtu.be как дополнительный режим;
 - скачивает видео через `yt-dlp`;
 - если YouTube не отдает выбранный формат, автоматически пробует несколько fallback-вариантов: легкий 720p MP4, общий bestvideo+bestaudio и single best;
@@ -125,6 +132,9 @@ POLLINATIONS_IMAGE_ENABLED=true
 STORAGE_PROVIDER=auto
 CLOUDINARY_FOLDER=auto-reels
 UPLOAD_VIDEO_LIMIT_MB=700
+ASR_PROVIDER=auto
+CLOUDFLARE_ASR_MODEL=@cf/openai/whisper
+ASR_CHUNK_SECONDS=55
 REEL_WIDTH=720
 REEL_HEIGHT=1280
 REEL_BACKGROUND_MODE=crop
@@ -132,7 +142,8 @@ REEL_VIDEO_PRESET=ultrafast
 REEL_VIDEO_CRF=24
 ```
 
-Опциональные бесплатные ключи добавляются в Render Dashboard как секреты: `GEMINI_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `HUGGINGFACE_API_KEY`, `DASHSCOPE_API_KEY`, `POLLINATIONS_API_KEY`.
+Опциональные бесплатные/low-cost ключи добавляются в Render Dashboard как секреты: `GEMINI_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `HUGGINGFACE_API_KEY`, `DASHSCOPE_API_KEY`, `POLLINATIONS_API_KEY`.
+`CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN` включают и обложки через Workers AI, и ASR для uploaded video. Если этих секретов нет, uploaded video продолжит резаться по таймингу без транскрипта.
 
 Если YouTube пишет `Sign in to confirm you're not a bot`, добавьте browser cookies в Render как секрет:
 
@@ -182,7 +193,7 @@ YTDLP_DOWNLOAD_TIMEOUT_MS=1200000
 CLOUDINARY_URL=cloudinary://<api_key>:<api_secret>@<cloud_name>
 ```
 
-После этого MP4, PNG-обложки, reference frame и `job.json` будут сохраняться в Cloudinary. Локальная `data/jobs` остается рабочим кэшем, а ZIP-сборка умеет подтягивать MP4 обратно по внешним URL.
+После этого MP4, PNG-обложки, reference frame и `job.json` будут сохраняться в Cloudinary. Локальная `data/jobs` остается рабочим кэшем, а ZIP-сборка умеет подтягивать MP4 обратно по внешним URL. В `/api/config` режим хранения должен стать `external-assets`.
 
 Важно: без `CLOUDINARY_URL` бесплатный Render все равно использует временную файловую систему. Рилсы и обложки доступны в `data/jobs` во время жизни инстанса, но после рестарта или redeploy могут исчезнуть.
 

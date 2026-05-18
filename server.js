@@ -41,6 +41,12 @@ const DEFAULT_POLLINATIONS_IMAGE_MODEL = process.env.POLLINATIONS_IMAGE_MODEL ||
 const DEFAULT_POLLINATIONS_TIMEOUT_MS = Number(process.env.POLLINATIONS_TIMEOUT_MS || 60000);
 const DEFAULT_POLLINATIONS_RETRY_ATTEMPTS = Number(process.env.POLLINATIONS_RETRY_ATTEMPTS || 3);
 const DEFAULT_POLLINATIONS_RETRY_DELAY_MS = Number(process.env.POLLINATIONS_RETRY_DELAY_MS || 4500);
+const ASR_PROVIDER = normalizeAsrProvider(process.env.ASR_PROVIDER || "auto");
+const CLOUDFLARE_ASR_MODEL = normalizeCloudflareModel(process.env.CLOUDFLARE_ASR_MODEL || "@cf/openai/whisper");
+const ASR_CHUNK_SECONDS = clampInt(process.env.ASR_CHUNK_SECONDS, 20, 180, 55);
+const ASR_MAX_AUDIO_SECONDS = readPositiveIntEnv("ASR_MAX_AUDIO_SECONDS", 2 * 60 * 60);
+const ASR_AUDIO_BITRATE = sanitizeAudioBitrate(process.env.ASR_AUDIO_BITRATE || "48k");
+const ASR_REQUEST_TIMEOUT_MS = readPositiveIntEnv("ASR_REQUEST_TIMEOUT_MS", 120000);
 const DEFAULT_YTDLP_ANTIBOT_EXTRACTOR_ARGS = "youtube:player-skip=webpage,configs;player-client=default,mweb";
 const YTDLP_ANDROID_VR_EXTRACTOR_ARGS = "youtube:player-skip=webpage,configs;player-client=android_vr";
 const YTDLP_TV_EXTRACTOR_ARGS = "youtube:player-skip=webpage,configs;player-client=tv";
@@ -158,6 +164,26 @@ function sanitizeFfmpegColor(value) {
   if (/^[A-Za-z]+$/.test(clean)) return clean;
   if (/^(?:0x|#)[0-9A-Fa-f]{6}(?:@[0-9.]+)?$/.test(clean)) return clean.replace(/^#/, "0x");
   return "black";
+}
+
+function normalizeAsrProvider(value) {
+  const provider = String(value || "").trim().toLowerCase();
+  if (["auto", "cloudflare", "cf", "none", "off", "false"].includes(provider)) {
+    if (provider === "cf") return "cloudflare";
+    if (provider === "off" || provider === "false") return "none";
+    return provider;
+  }
+  return "auto";
+}
+
+function normalizeCloudflareModel(value) {
+  const clean = String(value || "").trim();
+  return /^@cf\/[A-Za-z0-9._/-]+$/.test(clean) ? clean : "@cf/openai/whisper";
+}
+
+function sanitizeAudioBitrate(value) {
+  const clean = String(value || "").trim().toLowerCase();
+  return /^\d{2,3}k$/.test(clean) ? clean : "48k";
 }
 
 function normalizeLanguage(value) {
@@ -622,7 +648,7 @@ async function runJob(job) {
     log(job, `Источник: ${mediaFile}, ${Math.round(probe.duration)} сек, ${probe.width}x${probe.height}`);
 
     if (isUploadJob(job)) {
-      log(job, "Субтитры из видеофайла пока не приложены, продолжу без транскрипта");
+      await transcribeUploadedVideoBestEffort(job, mediaFile, probe);
     } else {
       await downloadCaptionsBestEffort(job);
     }
@@ -762,6 +788,246 @@ async function runJob(job) {
   } catch (error) {
     await failJob(job, error);
   }
+}
+
+function getAsrStatus() {
+  const hasCloudflare = Boolean(process.env.CLOUDFLARE_ACCOUNT_ID && process.env.CLOUDFLARE_API_TOKEN);
+  const provider = ASR_PROVIDER === "auto"
+    ? (hasCloudflare ? "cloudflare" : "none")
+    : ASR_PROVIDER;
+  return {
+    ok: provider === "none" || (provider === "cloudflare" && hasCloudflare),
+    provider,
+    requestedProvider: ASR_PROVIDER,
+    configured: provider === "cloudflare" ? hasCloudflare : provider === "none",
+    model: provider === "cloudflare" ? CLOUDFLARE_ASR_MODEL : "",
+    chunkSeconds: ASR_CHUNK_SECONDS,
+    maxAudioSeconds: ASR_MAX_AUDIO_SECONDS
+  };
+}
+
+async function transcribeUploadedVideoBestEffort(job, mediaFile, probe) {
+  const status = getAsrStatus();
+  job.asr = {
+    provider: status.provider,
+    model: status.model,
+    configured: status.configured,
+    status: "skipped",
+    chunks: 0,
+    cues: 0
+  };
+
+  if (status.provider === "none") {
+    log(job, "ASR не настроен: продолжу без транскрипта");
+    await saveJob(job);
+    return;
+  }
+  if (!status.ok || status.provider !== "cloudflare") {
+    log(job, "ASR Cloudflare не настроен: нужны CLOUDFLARE_ACCOUNT_ID и CLOUDFLARE_API_TOKEN");
+    await saveJob(job);
+    return;
+  }
+
+  const duration = Number(probe?.duration || 0);
+  if (!Number.isFinite(duration) || duration <= 0) {
+    log(job, "ASR пропущен: не удалось определить длительность видео");
+    await saveJob(job);
+    return;
+  }
+  if (duration > ASR_MAX_AUDIO_SECONDS) {
+    log(job, `ASR пропущен: видео длиннее лимита ${Math.round(ASR_MAX_AUDIO_SECONDS / 60)} мин`);
+    await saveJob(job);
+    return;
+  }
+
+  const asrDir = path.join(job.dir, "asr");
+  await fsp.mkdir(asrDir, { recursive: true });
+  const chunks = buildAsrChunks(duration);
+  const cues = [];
+  const textParts = [];
+  job.asr.status = "running";
+  job.asr.chunks = chunks.length;
+  await saveJob(job);
+  log(job, `ASR Cloudflare: ${chunks.length} аудио-фрагмент(а/ов) по ${ASR_CHUNK_SECONDS} сек`);
+
+  for (const [index, chunk] of chunks.entries()) {
+    const audioPath = path.join(asrDir, `chunk-${String(index + 1).padStart(3, "0")}.mp3`);
+    try {
+      await extractAudioChunkForAsr(job, mediaFile, audioPath, chunk);
+      const result = await requestCloudflareAsr(audioPath);
+      const chunkCues = cuesFromAsrResult(result, chunk.start, chunk.duration);
+      cues.push(...chunkCues);
+      if (result.text) textParts.push(result.text);
+      log(job, `ASR ${index + 1}/${chunks.length}: ${chunkCues.length} реплик`);
+    } catch (error) {
+      log(job, `ASR ${index + 1}/${chunks.length} не прошел: ${shortError(error)}`);
+    } finally {
+      await fsp.rm(audioPath, { force: true }).catch(() => {});
+    }
+  }
+
+  const compacted = compactCues(cues.sort((a, b) => a.start - b.start));
+  if (compacted.length === 0) {
+    job.asr.status = "empty";
+    job.asr.cues = 0;
+    log(job, "ASR не вернул распознаваемый текст, продолжу без транскрипта");
+    await saveJob(job);
+    return;
+  }
+
+  const transcriptName = "source.asr.vtt";
+  await fsp.writeFile(path.join(job.dir, transcriptName), buildVtt(compacted));
+  await fsp.writeFile(path.join(job.dir, "source.asr.txt"), textParts.join("\n").trim() || compacted.map((cue) => cue.text).join(" "));
+  job.asr.status = "done";
+  job.asr.cues = compacted.length;
+  job.asr.file = transcriptName;
+  log(job, `ASR готов: ${compacted.length} реплик, файл ${transcriptName}`);
+  await saveJob(job);
+}
+
+function buildAsrChunks(duration) {
+  const chunks = [];
+  for (let start = 0; start < duration; start += ASR_CHUNK_SECONDS) {
+    const chunkDuration = Math.min(ASR_CHUNK_SECONDS, duration - start);
+    if (chunkDuration < 0.6) break;
+    chunks.push({
+      start: round2(start),
+      duration: round2(chunkDuration)
+    });
+  }
+  return chunks;
+}
+
+async function extractAudioChunkForAsr(job, input, output, chunk) {
+  await runCommand("ffmpeg", [
+    "-y",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-ss",
+    String(chunk.start),
+    "-t",
+    String(chunk.duration),
+    "-i",
+    input,
+    "-vn",
+    "-ac",
+    "1",
+    "-ar",
+    "16000",
+    "-b:a",
+    ASR_AUDIO_BITRATE,
+    "-f",
+    "mp3",
+    output
+  ], {
+    cwd: job.dir,
+    logStdout: false,
+    timeoutMs: Math.max(30000, Math.round(chunk.duration * 4000))
+  }, job);
+}
+
+async function requestCloudflareAsr(audioPath) {
+  const endpoint = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(process.env.CLOUDFLARE_ACCOUNT_ID)}/ai/run/${CLOUDFLARE_ASR_MODEL}`;
+  const response = await fetchWithTimeout(endpoint, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN}`,
+      "content-type": "audio/mpeg"
+    },
+    body: await fsp.readFile(audioPath)
+  }, ASR_REQUEST_TIMEOUT_MS);
+  if (!response.ok) throw await buildHttpError(response, "Cloudflare Workers AI ASR failed");
+  const payload = await response.json();
+  const result = payload?.result || payload;
+  return {
+    text: cleanCaptionText(result?.text || result?.transcription || ""),
+    vtt: result?.vtt || "",
+    words: Array.isArray(result?.words) ? result.words : []
+  };
+}
+
+function cuesFromAsrResult(result, offsetSeconds, fallbackDuration) {
+  const offset = Number(offsetSeconds) || 0;
+  const vttCues = result?.vtt ? parseVtt(result.vtt) : [];
+  if (vttCues.length > 0) {
+    return vttCues.map((cue) => ({
+      start: round2(cue.start + offset),
+      end: round2(cue.end + offset),
+      text: cue.text
+    }));
+  }
+
+  const wordCues = cuesFromAsrWords(result?.words || [], offset);
+  if (wordCues.length > 0) return wordCues;
+
+  const text = cleanCaptionText(result?.text || "");
+  if (!text) return [];
+  return splitTextIntoEstimatedCues(text, offset, fallbackDuration);
+}
+
+function cuesFromAsrWords(words, offsetSeconds) {
+  const normalized = words
+    .map((word) => ({
+      text: cleanCaptionText(word.word || word.text || ""),
+      start: Number(word.start ?? word.start_time ?? word.timestamp?.[0]),
+      end: Number(word.end ?? word.end_time ?? word.timestamp?.[1])
+    }))
+    .filter((word) => word.text && Number.isFinite(word.start) && Number.isFinite(word.end));
+  const cues = [];
+  let bucket = [];
+  for (const word of normalized) {
+    bucket.push(word);
+    const text = bucket.map((item) => item.text).join(" ");
+    const duration = bucket[bucket.length - 1].end - bucket[0].start;
+    if (bucket.length >= 9 || duration >= 3.8 || /[.!?…]$/.test(word.text)) {
+      cues.push({
+        start: round2(bucket[0].start + offsetSeconds),
+        end: round2(Math.max(bucket[0].start + 0.4, bucket[bucket.length - 1].end) + offsetSeconds),
+        text
+      });
+      bucket = [];
+    }
+  }
+  if (bucket.length > 0) {
+    cues.push({
+      start: round2(bucket[0].start + offsetSeconds),
+      end: round2(Math.max(bucket[0].start + 0.4, bucket[bucket.length - 1].end) + offsetSeconds),
+      text: bucket.map((item) => item.text).join(" ")
+    });
+  }
+  return cues;
+}
+
+function splitTextIntoEstimatedCues(text, offsetSeconds, duration) {
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [];
+  const chunkSize = 10;
+  const groups = [];
+  for (let index = 0; index < words.length; index += chunkSize) {
+    groups.push(words.slice(index, index + chunkSize));
+  }
+  const cueDuration = Math.max(1.2, Number(duration || 0) / groups.length);
+  return groups.map((group, index) => ({
+    start: round2(offsetSeconds + cueDuration * index),
+    end: round2(offsetSeconds + cueDuration * (index + 1)),
+    text: group.join(" ")
+  }));
+}
+
+function buildVtt(cues) {
+  const lines = ["WEBVTT", ""];
+  cues.forEach((cue, index) => {
+    lines.push(String(index + 1));
+    lines.push(`${formatVttTime(cue.start)} --> ${formatVttTime(cue.end)}`);
+    lines.push(wrapSubtitle(cue.text));
+    lines.push("");
+  });
+  return lines.join("\n");
+}
+
+function formatVttTime(seconds) {
+  return formatSrtTime(seconds).replace(",", ".");
 }
 
 async function downloadCaptionsBestEffort(job) {
@@ -4185,6 +4451,7 @@ async function handleApi(req, res, pathname) {
       ok: true,
       port: PORT,
       storage: getPersistentStorageStatus(),
+      asr: getAsrStatus(),
       youtube: {
         cookies: publicYtDlpCookiesStatus(),
         antiBot: publicYtDlpAntiBotStatus()
