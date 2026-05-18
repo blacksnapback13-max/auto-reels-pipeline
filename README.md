@@ -152,11 +152,13 @@ npm run worker
 ONLINE_BASE_URL=https://auto-reels-shtunda13.onrender.com
 LOCAL_WORKER_TOKEN=тот-же-секрет-что-на-Render
 LOCAL_BASE_URL=http://127.0.0.1:3233
-YTDLP_COOKIES_FROM_BROWSER=chrome:Default
+YTDLP_COOKIES_PATH=/Volumes/T eror/AI/Apps/Авто сборка рилсов/data/runtime/local-youtube-cookies.txt
+YTDLP_METADATA_TIMEOUT_MS=240000
+YTDLP_DOWNLOAD_TIMEOUT_MS=1200000
 ```
 
 Он поднимает локальный pipeline на `127.0.0.1:3233`, забирает online-задачу,
-делает рилсы локально через browser cookies и загружает MP4 обратно в online job.
+делает рилсы локально через сохраненный cookies-файл и загружает MP4 обратно в online job.
 
 Для постоянного хранения на бесплатном Render добавьте в секреты:
 

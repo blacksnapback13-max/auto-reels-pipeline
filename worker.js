@@ -16,7 +16,8 @@ const POLL_MS = readPositiveIntEnv("LOCAL_WORKER_POLL_MS", 5000);
 const LOCAL_PORT = new URL(LOCAL_BASE_URL).port || "3233";
 const LOCAL_HOST = new URL(LOCAL_BASE_URL).hostname || "127.0.0.1";
 const START_LOCAL_SERVER = String(process.env.LOCAL_WORKER_START_SERVER || "true").trim().toLowerCase() !== "false";
-const LOCAL_COOKIES_FROM_BROWSER = String(process.env.YTDLP_COOKIES_FROM_BROWSER || "chrome:Default").trim();
+const LOCAL_COOKIES_FROM_BROWSER = String(process.env.YTDLP_COOKIES_FROM_BROWSER || "").trim();
+const RUN_ONCE = String(process.env.LOCAL_WORKER_ONCE || "").trim().toLowerCase() === "true";
 
 let localServer = null;
 let busy = false;
@@ -52,6 +53,7 @@ async function main() {
             console.error(`Job ${job.id}: ${error.message || error}`);
           });
           busy = false;
+          if (RUN_ONCE) shutdown(0);
         }
       }
     } catch (error) {
@@ -64,16 +66,20 @@ async function main() {
 async function ensureLocalServer() {
   if (await isLocalHealthy()) return;
 
+  const localEnv = {
+    ...process.env,
+    HOST: LOCAL_HOST,
+    PORT: LOCAL_PORT,
+    LOCAL_WORKER_DISABLE_QUEUE: "true",
+    LOG_JOB_EVENTS: process.env.LOG_JOB_EVENTS || "false"
+  };
+  if (LOCAL_COOKIES_FROM_BROWSER) {
+    localEnv.YTDLP_COOKIES_FROM_BROWSER = LOCAL_COOKIES_FROM_BROWSER;
+  }
+
   localServer = spawn(process.execPath, ["server.js"], {
     cwd: ROOT,
-    env: {
-      ...process.env,
-      HOST: LOCAL_HOST,
-      PORT: LOCAL_PORT,
-      LOCAL_WORKER_DISABLE_QUEUE: "true",
-      YTDLP_COOKIES_FROM_BROWSER: LOCAL_COOKIES_FROM_BROWSER,
-      LOG_JOB_EVENTS: process.env.LOG_JOB_EVENTS || "false"
-    },
+    env: localEnv,
     stdio: ["ignore", "pipe", "pipe"]
   });
 
