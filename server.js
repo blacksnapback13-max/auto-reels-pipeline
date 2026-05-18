@@ -64,6 +64,7 @@ const YTDLP_METADATA_TIMEOUT_MS = readPositiveIntEnv("YTDLP_METADATA_TIMEOUT_MS"
 const YTDLP_DOWNLOAD_TIMEOUT_MS = readPositiveIntEnv("YTDLP_DOWNLOAD_TIMEOUT_MS", 10 * 60 * 1000);
 const COMMAND_KILL_GRACE_MS = readPositiveIntEnv("COMMAND_KILL_GRACE_MS", 5000);
 const LOCAL_WORKER_UPLOAD_LIMIT_BYTES = readPositiveIntEnv("LOCAL_WORKER_UPLOAD_LIMIT_MB", 300) * 1024 * 1024;
+const UPLOAD_VIDEO_LIMIT_BYTES = readPositiveIntEnv("UPLOAD_VIDEO_LIMIT_MB", 700) * 1024 * 1024;
 const TOOLS_STATUS_CACHE_MS = Number(process.env.TOOLS_STATUS_CACHE_MS || 5 * 60 * 1000);
 const CRC32_TABLE = buildCrc32Table();
 let ffmpegFilterSupport = null;
@@ -76,6 +77,13 @@ let toolsStatusRefreshPromise = null;
 const STEP_DEFS = [
   ["metadata", "Метаданные YouTube"],
   ["download", "Скачивание видео и субтитров"],
+  ["analyze", "Поиск фрагментов"],
+  ["render", "Рендер вертикальных рилсов"]
+];
+
+const UPLOAD_STEP_DEFS = [
+  ["metadata", "Проверка видео"],
+  ["download", "Подготовка файла"],
   ["analyze", "Поиск фрагментов"],
   ["render", "Рендер вертикальных рилсов"]
 ];
@@ -165,22 +173,70 @@ function extractYoutubeId(parsed, host) {
   return match?.[1] || "";
 }
 
-function createJob(url, options) {
+function sanitizeUploadFilename(value) {
+  const raw = String(value || "uploaded-video")
+    .split(/[\\/]/)
+    .pop()
+    .replace(/[\0\r\n]+/g, " ")
+    .trim();
+  return raw.slice(0, 180) || "uploaded-video";
+}
+
+function uploadExtensionFrom(filename, contentType = "") {
+  const ext = path.extname(filename).toLowerCase();
+  if ([".mp4", ".mov", ".m4v", ".webm", ".mkv"].includes(ext)) return ext;
+  const type = String(contentType || "").toLowerCase();
+  if (type.includes("quicktime")) return ".mov";
+  if (type.includes("webm")) return ".webm";
+  if (type.includes("matroska")) return ".mkv";
+  if (type.startsWith("video/")) return ".mp4";
+  return "";
+}
+
+function titleFromUploadedFilename(filename) {
+  const name = path.basename(String(filename || "Загруженное видео"), path.extname(String(filename || "")))
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return name || "Загруженное видео";
+}
+
+function isUploadJob(job) {
+  return job?.inputType === "upload";
+}
+
+function parseBooleanParam(value, fallback = true) {
+  if (value === undefined || value === null || value === "") return fallback;
+  return !/^(false|0|no|off)$/i.test(String(value).trim());
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value >= 1024 * 1024 * 1024) return `${(value / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value >= 1024) return `${Math.round(value / 1024)} KB`;
+  return `${value} B`;
+}
+
+function createJob(url, options, input = {}) {
   const id = makeId();
   const dir = path.join(JOBS_DIR, id);
+  const inputType = input.inputType === "upload" ? "upload" : "youtube";
   return {
     id,
-    url,
+    inputType,
+    url: inputType === "youtube" ? url : "",
     dir,
     status: "queued",
     createdAt: iso(),
     updatedAt: iso(),
     options,
-    steps: STEP_DEFS.map(([stepId, label]) => ({
+    steps: (inputType === "upload" ? UPLOAD_STEP_DEFS : STEP_DEFS).map(([stepId, label]) => ({
       id: stepId,
       label,
       status: "pending"
     })),
+    upload: input.upload || null,
     logs: [],
     metadata: null,
     source: null,
@@ -466,35 +522,56 @@ async function runJob(job) {
     await saveJob(job);
 
     await setStep(job, "metadata", "running");
-    log(job, "Читаю метаданные YouTube");
-    const cookieStatus = getYtDlpCookiesStatus();
-    if (cookieStatus.configured) {
-      log(job, `YouTube cookies: включены (${cookieStatus.source})`);
+    if (isUploadJob(job)) {
+      log(job, "Проверяю загруженное видео");
+      const uploadedFile = job.upload?.sourceFile || await findMediaFile(job.dir);
+      if (!uploadedFile) throw new Error("Загруженный видеофайл не найден");
+      const probe = await ffprobe(uploadedFile, job.dir);
+      job.metadata = {
+        title: titleFromUploadedFilename(job.upload?.originalName || uploadedFile),
+        uploader: "Загруженное видео",
+        duration: probe.duration,
+        webpage_url: "",
+        thumbnail: "",
+        view_count: null
+      };
+      await fsp.writeFile(path.join(job.dir, "metadata.json"), JSON.stringify(job.metadata, null, 2));
+      log(job, `Видео: ${job.metadata.title}`);
+    } else {
+      log(job, "Читаю метаданные YouTube");
+      const cookieStatus = getYtDlpCookiesStatus();
+      if (cookieStatus.configured) {
+        log(job, `YouTube cookies: включены (${cookieStatus.source})`);
+      }
+      const metadataRaw = await runYtDlp(job, [
+        "--dump-single-json",
+        "--no-warnings",
+        "--no-playlist",
+        "--skip-download",
+        "--no-check-formats",
+        job.url
+      ], { cwd: job.dir, logStdout: false });
+      const metadata = JSON.parse(metadataRaw);
+      job.metadata = {
+        title: metadata.title || "YouTube video",
+        uploader: metadata.uploader || metadata.channel || "",
+        duration: Number(metadata.duration || 0),
+        webpage_url: metadata.webpage_url || job.url,
+        thumbnail: metadata.thumbnail || "",
+        view_count: metadata.view_count || null
+      };
+      await fsp.writeFile(path.join(job.dir, "metadata.json"), JSON.stringify(metadata, null, 2));
+      log(job, `Видео: ${job.metadata.title}`);
     }
-    const metadataRaw = await runYtDlp(job, [
-      "--dump-single-json",
-      "--no-warnings",
-      "--no-playlist",
-      "--skip-download",
-      "--no-check-formats",
-      job.url
-    ], { cwd: job.dir, logStdout: false });
-    const metadata = JSON.parse(metadataRaw);
-    job.metadata = {
-      title: metadata.title || "YouTube video",
-      uploader: metadata.uploader || metadata.channel || "",
-      duration: Number(metadata.duration || 0),
-      webpage_url: metadata.webpage_url || job.url,
-      thumbnail: metadata.thumbnail || "",
-      view_count: metadata.view_count || null
-    };
-    await fsp.writeFile(path.join(job.dir, "metadata.json"), JSON.stringify(metadata, null, 2));
-    log(job, `Видео: ${job.metadata.title}`);
     await setStep(job, "metadata", "done");
 
     await setStep(job, "download", "running");
-    log(job, "Скачиваю видео");
-    await downloadSourceVideo(job);
+    if (isUploadJob(job)) {
+      log(job, "Использую загруженный файл");
+    } else {
+      log(job, "Скачиваю видео");
+      await downloadSourceVideo(job);
+    }
 
     const mediaFile = await findMediaFile(job.dir);
     if (!mediaFile) {
@@ -510,7 +587,11 @@ async function runJob(job) {
     };
     log(job, `Источник: ${mediaFile}, ${Math.round(probe.duration)} сек, ${probe.width}x${probe.height}`);
 
-    await downloadCaptionsBestEffort(job);
+    if (isUploadJob(job)) {
+      log(job, "Субтитры из видеофайла пока не приложены, продолжу без транскрипта");
+    } else {
+      await downloadCaptionsBestEffort(job);
+    }
     await setStep(job, "download", "done");
 
     await setStep(job, "analyze", "running");
@@ -2164,6 +2245,44 @@ async function readRequestBuffer(req, limitBytes = 50 * 1024 * 1024) {
     chunks.push(chunk);
   }
   return Buffer.concat(chunks);
+}
+
+async function readRequestToFile(req, filePath, limitBytes) {
+  await fsp.mkdir(path.dirname(filePath), { recursive: true });
+  return new Promise((resolve, reject) => {
+    let total = 0;
+    let settled = false;
+    const output = fs.createWriteStream(filePath, { flags: "w" });
+
+    const finish = (error = null) => {
+      if (settled) return;
+      settled = true;
+      if (error) {
+        output.destroy();
+        fsp.rm(filePath, { force: true }).finally(() => reject(error));
+      } else {
+        resolve(total);
+      }
+    };
+
+    req.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > limitBytes) {
+        const error = new Error(`Файл слишком большой: лимит ${formatBytes(limitBytes)}`);
+        error.statusCode = 413;
+        finish(error);
+        req.destroy();
+        return;
+      }
+      if (!output.write(chunk)) req.pause();
+    });
+    output.on("drain", () => req.resume());
+    req.on("end", () => {
+      output.end(() => finish());
+    });
+    req.on("error", finish);
+    output.on("error", finish);
+  });
 }
 
 function sendJson(res, status, payload) {
@@ -4203,6 +4322,53 @@ async function handleApi(req, res, pathname) {
       return;
     }
     sendJson(res, 200, { job: publicJob(job) });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/jobs/upload") {
+    const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+    const originalName = sanitizeUploadFilename(url.searchParams.get("filename"));
+    const contentType = req.headers["content-type"] || "";
+    const ext = uploadExtensionFrom(originalName, contentType);
+    if (!ext) {
+      sendJson(res, 400, { error: "Поддерживаются видеофайлы MP4, MOV, M4V, WEBM или MKV" });
+      return;
+    }
+
+    const contentLength = Number(req.headers["content-length"] || 0);
+    if (contentLength > UPLOAD_VIDEO_LIMIT_BYTES) {
+      sendJson(res, 413, { error: `Файл слишком большой: лимит ${formatBytes(UPLOAD_VIDEO_LIMIT_BYTES)}` });
+      return;
+    }
+
+    const input = Object.fromEntries(url.searchParams.entries());
+    input.subtitles = parseBooleanParam(input.subtitles, true);
+    const job = createJob("", defaultOptions(input), {
+      inputType: "upload",
+      upload: {
+        originalName,
+        sourceFile: `source${ext}`,
+        contentType: String(contentType || ""),
+        bytes: 0
+      }
+    });
+
+    jobs.set(job.id, job);
+    try {
+      await saveJob(job);
+      const targetPath = path.join(job.dir, job.upload.sourceFile);
+      const bytes = await readRequestToFile(req, targetPath, UPLOAD_VIDEO_LIMIT_BYTES);
+      if (bytes <= 0) throw new Error("Видео не загрузилось: файл пустой");
+      job.upload.bytes = bytes;
+      log(job, `Загружен файл: ${originalName}, ${formatBytes(bytes)}`);
+      await saveJob(job);
+      runJob(job);
+      sendJson(res, 202, { job: publicJob(job) });
+    } catch (error) {
+      jobs.delete(job.id);
+      await fsp.rm(job.dir, { recursive: true, force: true }).catch(() => {});
+      sendJson(res, error.statusCode || 400, { error: error.message || "Не удалось загрузить видео" });
+    }
     return;
   }
 

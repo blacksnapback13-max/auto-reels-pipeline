@@ -21,6 +21,8 @@ services:
         value: auto
       - key: CLOUDINARY_FOLDER
         value: auto-reels
+      - key: UPLOAD_VIDEO_LIMIT_MB
+        value: "700"
       - key: GEMINI_API_KEY
         sync: false
       - key: CLOUDFLARE_ACCOUNT_ID

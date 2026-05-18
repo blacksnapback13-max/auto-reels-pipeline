@@ -1,7 +1,8 @@
 # Авто сборка рилсов Онлайн
 
-Эта папка — онлайн-ветка проекта: GitHub + Render + локальный Mac-воркер для случаев,
-когда YouTube блокирует облачный IP.
+Эта папка — онлайн-ветка проекта: GitHub + Render. Основной автономный сценарий:
+пользователь загружает готовый MP4/MOV с телефона, а сайт сам режет его на рилсы.
+Локальный Mac-воркер остается запасным режимом только для YouTube-ссылок, если YouTube блокирует облачный IP.
 
 Стабильная оффлайн-версия сохранена отдельно и больше не трогается в рамках online-доработок:
 
@@ -9,7 +10,13 @@
 /Volumes/T eror/AI/Apps/Авто сборка рилсов Оффлайн
 ```
 
-Локальный MVP пайплайна:
+Основной online-пайплайн:
+
+```text
+uploaded video -> ffprobe -> timing/story clips -> trendy captions when transcript exists -> ffmpeg -> vertical reels
+```
+
+Запасной YouTube-пайплайн:
 
 ```text
 YouTube URL -> yt-dlp -> captions/transcript -> story-aware clips -> trendy captions -> ffmpeg -> vertical reels
@@ -47,7 +54,9 @@ https://github.com/blacksnapback13-max/auto-reels-pipeline
 
 ## Что уже умеет
 
-- принимает ссылку YouTube / youtu.be;
+- принимает готовый видеофайл `MP4`, `MOV`, `M4V`, `WEBM` или `MKV` через `/api/jobs/upload`;
+- для загруженного файла полностью работает на Render без Mac и без YouTube anti-bot;
+- принимает ссылку YouTube / youtu.be как дополнительный режим;
 - скачивает видео через `yt-dlp`;
 - если YouTube не отдает выбранный формат, автоматически пробует несколько fallback-вариантов: легкий 720p MP4, общий bestvideo+bestaudio и single best;
 - поддерживает YouTube browser cookies через секреты `YTDLP_COOKIES_BASE64`, `YTDLP_COOKIES_TEXT` или локальный `YTDLP_COOKIES_PATH`, чтобы обходить серверную проверку "Sign in to confirm you're not a bot";
@@ -114,6 +123,7 @@ AI_IMAGE_PROVIDER_ORDER=gemini,cloudflare,huggingface,qwen,pollinations
 POLLINATIONS_IMAGE_ENABLED=true
 STORAGE_PROVIDER=auto
 CLOUDINARY_FOLDER=auto-reels
+UPLOAD_VIDEO_LIMIT_MB=700
 ```
 
 Опциональные бесплатные ключи добавляются в Render Dashboard как секреты: `GEMINI_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `HUGGINGFACE_API_KEY`, `DASHSCOPE_API_KEY`, `POLLINATIONS_API_KEY`.

@@ -139,6 +139,63 @@
       margin-bottom: 16px;
     }
 
+    .source-toggle {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 4px;
+      margin-bottom: 16px;
+      padding: 4px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f0eee8;
+    }
+
+    .source-toggle label {
+      position: relative;
+      margin: 0;
+      min-width: 0;
+      cursor: pointer;
+    }
+
+    .source-toggle input {
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .source-toggle span {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 38px;
+      border-radius: 6px;
+      color: var(--muted);
+      font-weight: 800;
+      font-size: 14px;
+      text-align: center;
+    }
+
+    .source-toggle input:checked + span {
+      background: #fff;
+      color: var(--accent);
+      box-shadow: 0 4px 16px rgba(32, 33, 36, 0.08);
+    }
+
+    input[type="file"] {
+      padding: 9px;
+    }
+
+    .is-hidden {
+      display: none;
+    }
+
+    .upload-progress {
+      margin: 0;
+      padding: 22px;
+      color: var(--muted);
+      text-align: center;
+    }
+
     .grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -705,7 +762,7 @@
     <header>
       <div>
         <h1>Авто сборка рилсов</h1>
-        <p class="subtitle">Локальный пайплайн: YouTube ссылка на входе, вертикальные MP4-фрагменты на выходе.</p>
+        <p class="subtitle">Онлайн-пайплайн: видео или YouTube ссылка на входе, вертикальные MP4-фрагменты на выходе.</p>
       </div>
       <div class="status-pill" id="toolStatus">Проверяю инструменты...</div>
     </header>
@@ -714,9 +771,25 @@
       <section class="panel">
         <h2>Новая сборка</h2>
         <form id="jobForm">
-          <div class="field">
+          <div class="source-toggle" role="radiogroup" aria-label="Источник видео">
+            <label>
+              <input name="sourceMode" type="radio" value="upload" checked>
+              <span>Видео</span>
+            </label>
+            <label>
+              <input name="sourceMode" type="radio" value="youtube">
+              <span>YouTube</span>
+            </label>
+          </div>
+
+          <div class="field" data-source-field="upload">
+            <label for="videoFile">Файл проповеди</label>
+            <input id="videoFile" name="videoFile" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-m4v,.mp4,.mov,.m4v,.webm,.mkv" required>
+          </div>
+
+          <div class="field is-hidden" data-source-field="youtube">
             <label for="url">YouTube ссылка</label>
-            <input id="url" name="url" type="url" placeholder="https://www.youtube.com/watch?v=..." required>
+            <input id="url" name="url" type="url" placeholder="https://www.youtube.com/watch?v=...">
           </div>
 
           <div class="grid">
@@ -759,7 +832,7 @@
           </label>
 
           <button id="submitButton" type="submit">Собрать рилсы</button>
-          <p class="hint">Локально файлы лежат в data/jobs; на Render можно включить Cloudinary для постоянных MP4 и обложек.</p>
+          <p class="hint">Для постоянных MP4 и обложек в online-режиме нужен Cloudinary.</p>
         </form>
       </section>
 
@@ -772,6 +845,10 @@
   <script>
     const form = document.querySelector("#jobForm");
     const submitButton = document.querySelector("#submitButton");
+    const sourceRadios = [...document.querySelectorAll("input[name='sourceMode']")];
+    const sourceFields = [...document.querySelectorAll("[data-source-field]")];
+    const urlInput = document.querySelector("#url");
+    const videoInput = document.querySelector("#videoFile");
     const jobPanel = document.querySelector("#jobPanel");
     const toolStatus = document.querySelector("#toolStatus");
     const API_BASE = location.protocol === "file:" ? "http://127.0.0.1:3232" : "";
@@ -790,6 +867,9 @@
     let activeJobId = null;
     let pollTimer = null;
 
+    sourceRadios.forEach((radio) => radio.addEventListener("change", syncSourceMode));
+    syncSourceMode();
+
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       submitButton.disabled = true;
@@ -797,13 +877,7 @@
       payload.subtitles = document.querySelector("#subtitles").checked;
 
       try {
-        const response = await fetch(`${API_BASE}/api/jobs`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(payload)
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "Не удалось создать задачу");
+        const data = await createJob(payload);
         activeJobId = data.job.id;
         renderJob(data.job);
         startPolling();
@@ -813,6 +887,64 @@
         submitButton.disabled = false;
       }
     });
+
+    function syncSourceMode() {
+      const mode = sourceRadios.find((radio) => radio.checked)?.value || "upload";
+      sourceFields.forEach((field) => {
+        const active = field.dataset.sourceField === mode;
+        field.classList.toggle("is-hidden", !active);
+      });
+      urlInput.required = mode === "youtube";
+      videoInput.required = mode === "upload";
+    }
+
+    async function createJob(payload) {
+      if (payload.sourceMode === "youtube") {
+        const response = await fetch(`${API_BASE}/api/jobs`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Не удалось создать задачу");
+        return data;
+      }
+
+      const file = videoInput.files?.[0];
+      if (!file) throw new Error("Выберите видеофайл");
+      const params = new URLSearchParams({
+        filename: file.name,
+        count: payload.count || "3",
+        language: payload.language || "auto",
+        minDuration: payload.minDuration || "28",
+        maxDuration: payload.maxDuration || "55",
+        subtitles: payload.subtitles ? "true" : "false"
+      });
+      return uploadVideoJob(`${API_BASE}/api/jobs/upload?${params.toString()}`, file);
+    }
+
+    function uploadVideoJob(url, file) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", url);
+        xhr.responseType = "json";
+        xhr.setRequestHeader("content-type", file.type || "application/octet-stream");
+        xhr.upload.onprogress = (event) => {
+          const percent = event.lengthComputable ? Math.round((event.loaded / event.total) * 100) : 0;
+          jobPanel.innerHTML = `<p class="upload-progress">Загружаю видео${percent ? ` · ${percent}%` : ""}</p>`;
+        };
+        xhr.onload = () => {
+          const data = xhr.response || {};
+          if (xhr.status < 200 || xhr.status >= 300) {
+            reject(new Error(data.error || "Не удалось загрузить видео"));
+            return;
+          }
+          resolve(data);
+        };
+        xhr.onerror = () => reject(new Error("Не удалось загрузить видео"));
+        xhr.send(file);
+      });
+    }
 
     jobPanel.addEventListener("click", async (event) => {
       const coverButton = event.target.closest("[data-cover-index]");
