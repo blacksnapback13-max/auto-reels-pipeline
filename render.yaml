@@ -23,6 +23,16 @@ services:
         value: auto-reels
       - key: UPLOAD_VIDEO_LIMIT_MB
         value: "700"
+      - key: REEL_WIDTH
+        value: "720"
+      - key: REEL_HEIGHT
+        value: "1280"
+      - key: REEL_BACKGROUND_MODE
+        value: crop
+      - key: REEL_VIDEO_PRESET
+        value: ultrafast
+      - key: REEL_VIDEO_CRF
+        value: "24"
       - key: GEMINI_API_KEY
         sync: false
       - key: CLOUDFLARE_ACCOUNT_ID

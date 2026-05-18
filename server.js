@@ -65,6 +65,13 @@ const YTDLP_DOWNLOAD_TIMEOUT_MS = readPositiveIntEnv("YTDLP_DOWNLOAD_TIMEOUT_MS"
 const COMMAND_KILL_GRACE_MS = readPositiveIntEnv("COMMAND_KILL_GRACE_MS", 5000);
 const LOCAL_WORKER_UPLOAD_LIMIT_BYTES = readPositiveIntEnv("LOCAL_WORKER_UPLOAD_LIMIT_MB", 300) * 1024 * 1024;
 const UPLOAD_VIDEO_LIMIT_BYTES = readPositiveIntEnv("UPLOAD_VIDEO_LIMIT_MB", 700) * 1024 * 1024;
+const REEL_WIDTH = readEvenPositiveIntEnv("REEL_WIDTH", 1080);
+const REEL_HEIGHT = readEvenPositiveIntEnv("REEL_HEIGHT", 1920);
+const REEL_BACKGROUND_MODE = normalizeReelBackgroundMode(process.env.REEL_BACKGROUND_MODE || "blur");
+const REEL_VIDEO_PRESET = safeFfmpegToken(process.env.REEL_VIDEO_PRESET || "veryfast", "veryfast");
+const REEL_VIDEO_CRF = clampInt(process.env.REEL_VIDEO_CRF, 16, 35, 20);
+const REEL_BLUR_STRENGTH = clampInt(process.env.REEL_BLUR_STRENGTH, 0, 40, 24);
+const REEL_PAD_COLOR = sanitizeFfmpegColor(process.env.REEL_PAD_COLOR || "black");
 const TOOLS_STATUS_CACHE_MS = Number(process.env.TOOLS_STATUS_CACHE_MS || 5 * 60 * 1000);
 const CRC32_TABLE = buildCrc32Table();
 let ffmpegFilterSupport = null;
@@ -124,6 +131,32 @@ function clampInt(value, min, max, fallback) {
 function readPositiveIntEnv(name, fallback) {
   const n = Number.parseInt(process.env[name] || "", 10);
   return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function readEvenPositiveIntEnv(name, fallback) {
+  const value = readPositiveIntEnv(name, fallback);
+  const even = value % 2 === 0 ? value : value - 1;
+  return even >= 2 ? even : fallback;
+}
+
+function normalizeReelBackgroundMode(value) {
+  const mode = String(value || "").trim().toLowerCase();
+  if (mode === "fit-blur" || mode === "blur") return "blur";
+  if (mode === "fit" || mode === "pad") return "pad";
+  if (mode === "fill" || mode === "crop") return "crop";
+  return "blur";
+}
+
+function safeFfmpegToken(value, fallback) {
+  const clean = String(value || "").trim();
+  return /^[A-Za-z0-9_-]+$/.test(clean) ? clean : fallback;
+}
+
+function sanitizeFfmpegColor(value) {
+  const clean = String(value || "").trim();
+  if (/^[A-Za-z]+$/.test(clean)) return clean;
+  if (/^(?:0x|#)[0-9A-Fa-f]{6}(?:@[0-9.]+)?$/.test(clean)) return clean.replace(/^#/, "0x");
+  return "black";
 }
 
 function normalizeLanguage(value) {
@@ -627,7 +660,14 @@ async function runJob(job) {
       subtitleMode: canRenderImageCaptions ? "trendy-image-overlays" : (canBurnSubtitles ? "ffmpeg-subtitles" : "none"),
       subtitleBurn: canRenderImageCaptions || canBurnSubtitles,
       ffmpegFilters: filters,
-      captionRenderer
+      captionRenderer,
+      video: {
+        width: REEL_WIDTH,
+        height: REEL_HEIGHT,
+        backgroundMode: REEL_BACKGROUND_MODE,
+        preset: REEL_VIDEO_PRESET,
+        crf: REEL_VIDEO_CRF
+      }
     };
     if (canRenderImageCaptions) {
       log(job, "Субтитры: трендовые PNG-оверлеи через Pillow");
@@ -1624,8 +1664,8 @@ async function buildTrendyCaptionAssets({ job, segment, cues, options, reelIndex
   await fsp.mkdir(captionRoot, { recursive: true });
   const planPath = path.join(captionRoot, "captions.json");
   await fsp.writeFile(planPath, JSON.stringify({
-    width: 1080,
-    height: 1920,
+    width: REEL_WIDTH,
+    height: REEL_HEIGHT,
     chunks
   }, null, 2));
 
@@ -1887,6 +1927,31 @@ function readFfmpegProgressSeconds(state) {
   return 0;
 }
 
+function buildVerticalVideoFilters({ subtitleFilter, baseLabel }) {
+  const width = REEL_WIDTH;
+  const height = REEL_HEIGHT;
+
+  if (REEL_BACKGROUND_MODE === "crop") {
+    return [
+      `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},setsar=1${subtitleFilter}[${baseLabel}]`
+    ];
+  }
+
+  if (REEL_BACKGROUND_MODE === "pad") {
+    return [
+      `[0:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:${REEL_PAD_COLOR},setsar=1${subtitleFilter}[${baseLabel}]`
+    ];
+  }
+
+  const blurFilter = REEL_BLUR_STRENGTH > 0 ? `,boxblur=${REEL_BLUR_STRENGTH}:1` : "";
+  return [
+    "[0:v]split=2[v0][v1]",
+    `[v0]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}${blurFilter},eq=brightness=-0.07:saturation=0.85[bg]`,
+    `[v1]scale=${width}:${height}:force_original_aspect_ratio=decrease[fg]`,
+    `[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1${subtitleFilter}[${baseLabel}]`
+  ];
+}
+
 async function renderSegment({ job, input, output, srtName, captionOverlays = [], segment, outputName = "reel.mp4", reelNumber = 1, reelTotal = 1 }) {
   const duration = Math.max(0.1, segment.end - segment.start);
   const onStdoutLine = createFfmpegProgressHandler(job, {
@@ -1918,12 +1983,7 @@ async function renderSegment({ job, input, output, srtName, captionOverlays = []
   }
 
   const baseLabel = captionOverlays.length > 0 ? "base" : "v";
-  const filterParts = [
-    "[0:v]split=2[v0][v1]",
-    "[v0]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=24:1,eq=brightness=-0.07:saturation=0.85[bg]",
-    "[v1]scale=1080:1920:force_original_aspect_ratio=decrease[fg]",
-    `[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1${subtitleFilter}[${baseLabel}]`
-  ];
+  const filterParts = buildVerticalVideoFilters({ subtitleFilter, baseLabel });
 
   let currentLabel = baseLabel;
   captionOverlays.forEach((caption, index) => {
@@ -1965,9 +2025,9 @@ async function renderSegment({ job, input, output, srtName, captionOverlays = []
     "-c:v",
     "libx264",
     "-preset",
-    "veryfast",
+    REEL_VIDEO_PRESET,
     "-crf",
-    "20",
+    String(REEL_VIDEO_CRF),
     "-pix_fmt",
     "yuv420p",
     "-c:a",

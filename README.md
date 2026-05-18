@@ -66,7 +66,7 @@ https://github.com/blacksnapback13-max/auto-reels-pipeline
 - отбрасывает клиффхэнгерные концовки и может слегка продлить фрагмент, если payoff идет сразу после мягкого лимита;
 - добавляет 1 секунду хвоста в конец каждого reel, чтобы фраза и реакция не обрывались резко;
 - если субтитров нет, делает fallback-нарезку по таймингу;
-- рендерит вертикальные `1080x1920` MP4 через `ffmpeg`;
+- рендерит вертикальные MP4 через `ffmpeg`; размер и профиль задаются `REEL_WIDTH`, `REEL_HEIGHT`, `REEL_BACKGROUND_MODE`, `REEL_VIDEO_PRESET`, `REEL_VIDEO_CRF`;
 - показывает live-прогресс текущего reel из `ffmpeg -progress pipe:1`;
 - добавляет blurred background, foreground fit, loudness normalize, 30ms audio fades;
 - опционально добавляет чистые Reels-style burned-in captions через PNG-оверлеи, сгенерированные Pillow;
@@ -111,6 +111,7 @@ health: /api/health
 ```
 
 Docker-образ внутри себя ставит `ffmpeg`, `ffprobe`, `python3`, `Pillow` и свежий `yt-dlp`, поэтому онлайн-версия запускает тот же пайплайн, что и локальная. Render healthcheck использует легкий `/api/health`, а полный `/api/config` кэширует проверку инструментов.
+Для бесплатного Render включен облегченный профиль `720x1280 + crop + ultrafast`, потому что тяжелый `1080x1920 + blur` на free-инстансе может перезапустить процесс во время ffmpeg.
 
 В Docker также ставится `bgutil-ytdlp-pot-provider` 1.3.1. Это бесплатный PO-token provider для `yt-dlp`, который помогает на облачных IP, где YouTube отклоняет даже browser cookies.
 
@@ -124,6 +125,11 @@ POLLINATIONS_IMAGE_ENABLED=true
 STORAGE_PROVIDER=auto
 CLOUDINARY_FOLDER=auto-reels
 UPLOAD_VIDEO_LIMIT_MB=700
+REEL_WIDTH=720
+REEL_HEIGHT=1280
+REEL_BACKGROUND_MODE=crop
+REEL_VIDEO_PRESET=ultrafast
+REEL_VIDEO_CRF=24
 ```
 
 Опциональные бесплатные ключи добавляются в Render Dashboard как секреты: `GEMINI_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `HUGGINGFACE_API_KEY`, `DASHSCOPE_API_KEY`, `POLLINATIONS_API_KEY`.
