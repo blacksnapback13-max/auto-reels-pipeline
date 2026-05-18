@@ -876,11 +876,44 @@ async function transcribeUploadedVideoBestEffort(job, mediaFile, probe) {
   }
 
   const transcriptName = "source.asr.vtt";
-  await fsp.writeFile(path.join(job.dir, transcriptName), buildVtt(compacted));
-  await fsp.writeFile(path.join(job.dir, "source.asr.txt"), textParts.join("\n").trim() || compacted.map((cue) => cue.text).join(" "));
+  const transcriptPath = path.join(job.dir, transcriptName);
+  const textName = "source.asr.txt";
+  const textPath = path.join(job.dir, textName);
+  await fsp.writeFile(transcriptPath, buildVtt(compacted));
+  await fsp.writeFile(textPath, textParts.join("\n").trim() || compacted.map((cue) => cue.text).join(" "));
+  const transcriptAsset = {
+    file: `/jobs/${job.id}/${transcriptName}`,
+    localFile: `/jobs/${job.id}/${transcriptName}`
+  };
+  await persistJobAsset(job, transcriptAsset, {
+    localPath: transcriptPath,
+    kind: "transcript-vtt",
+    resourceType: "raw",
+    mimeType: "text/vtt",
+    publicId: `${CLOUDINARY_FOLDER}/${job.id}/transcripts/source.asr.vtt`,
+    logLabel: "ASR VTT"
+  });
+  const textAsset = {
+    file: `/jobs/${job.id}/${textName}`,
+    localFile: `/jobs/${job.id}/${textName}`
+  };
+  await persistJobAsset(job, textAsset, {
+    localPath: textPath,
+    kind: "transcript-text",
+    resourceType: "raw",
+    mimeType: "text/plain",
+    publicId: `${CLOUDINARY_FOLDER}/${job.id}/transcripts/source.asr.txt`,
+    logLabel: "ASR TXT"
+  });
   job.asr.status = "done";
   job.asr.cues = compacted.length;
   job.asr.file = transcriptName;
+  job.asr.vtt = transcriptAsset.file;
+  job.asr.text = textAsset.file;
+  job.asr.storage = {
+    vtt: transcriptAsset.storage || null,
+    text: textAsset.storage || null
+  };
   log(job, `ASR готов: ${compacted.length} реплик, файл ${transcriptName}`);
   await saveJob(job);
 }
@@ -2693,7 +2726,8 @@ function mimeType(filePath) {
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
-    ".srt": "text/plain; charset=utf-8"
+    ".srt": "text/plain; charset=utf-8",
+    ".vtt": "text/vtt; charset=utf-8"
   }[ext] || "application/octet-stream";
 }
 
