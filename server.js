@@ -77,8 +77,8 @@ const REEL_HEIGHT = readEvenPositiveIntEnv("REEL_HEIGHT", IS_PRODUCTION ? 1280 :
 const REEL_BACKGROUND_MODE = normalizeReelBackgroundMode(process.env.REEL_BACKGROUND_MODE || (IS_PRODUCTION ? "crop" : "blur"));
 const REEL_VIDEO_PRESET = safeFfmpegToken(process.env.REEL_VIDEO_PRESET || (IS_PRODUCTION ? "ultrafast" : "veryfast"), IS_PRODUCTION ? "ultrafast" : "veryfast");
 const REEL_VIDEO_CRF = clampInt(process.env.REEL_VIDEO_CRF, 16, 35, IS_PRODUCTION ? 24 : 20);
-const REEL_SUBTITLE_FONT_SIZE = clampInt(process.env.REEL_SUBTITLE_FONT_SIZE, 8, 36, 9);
-const REEL_SUBTITLE_MARGIN_V = clampInt(process.env.REEL_SUBTITLE_MARGIN_V, 80, 520, 285);
+const REEL_SUBTITLE_FONT_SIZE = clampInt(process.env.REEL_SUBTITLE_FONT_SIZE, 8, 36, 14);
+const REEL_SUBTITLE_MARGIN_V = clampInt(process.env.REEL_SUBTITLE_MARGIN_V, 40, 360, 105);
 const TRENDY_CAPTIONS_ENABLED = readBooleanEnv("TRENDY_CAPTIONS_ENABLED", !IS_PRODUCTION);
 const TRENDY_CAPTION_MAX_OVERLAYS = clampInt(process.env.TRENDY_CAPTION_MAX_OVERLAYS, 8, 90, IS_PRODUCTION ? 28 : 90);
 const REEL_BLUR_STRENGTH = clampInt(process.env.REEL_BLUR_STRENGTH, 0, 40, 24);
@@ -198,7 +198,7 @@ function sanitizeAudioBitrate(value) {
 }
 
 function normalizeLanguage(value) {
-  const allowed = new Set(["auto", "ru", "uk", "en"]);
+  const allowed = new Set(["auto", "ru", "uk", "en", "pl", "tr"]);
   return allowed.has(value) ? value : "auto";
 }
 
@@ -746,14 +746,18 @@ function buildSubLangs(language) {
   if (language === "ru") return "ru.*,ru,en.*,en";
   if (language === "uk") return "uk.*,uk,ru.*,ru,en.*,en";
   if (language === "en") return "en.*,en";
-  return "ru.*,ru,uk.*,uk,en.*,en";
+  if (language === "pl") return "pl.*,pl,en.*,en";
+  if (language === "tr") return "tr.*,tr,en.*,en";
+  return "ru.*,ru,uk.*,uk,pl.*,pl,tr.*,tr,en.*,en";
 }
 
 function buildSubtitleLanguageAttempts(language) {
   if (language === "ru") return ["ru.*,ru", "en.*,en"];
   if (language === "uk") return ["uk.*,uk", "ru.*,ru", "en.*,en"];
   if (language === "en") return ["en.*,en"];
-  return ["ru.*,ru", "uk.*,uk", "en.*,en"];
+  if (language === "pl") return ["pl.*,pl", "en.*,en"];
+  if (language === "tr") return ["tr.*,tr", "en.*,en"];
+  return ["ru.*,ru", "uk.*,uk", "pl.*,pl", "tr.*,tr", "en.*,en"];
 }
 
 async function runJob(job) {
@@ -978,7 +982,11 @@ async function runJob(job) {
         reason: segment.reason,
         captions: captionOverlays.length,
         text: segment.text,
-        description: generateReelDescription({ text: segment.text })
+        language: detectTextLanguage(segment.text, job.options.language),
+        description: generateReelDescription({
+          text: segment.text,
+          language: detectTextLanguage(segment.text, job.options.language)
+        })
       };
       job.outputs.push(outputItem);
       await persistJobAsset(job, outputItem, {
@@ -1420,8 +1428,8 @@ async function findCaptionFile(dir, language) {
   if (captions.length === 0) return null;
 
   const preferred = language === "auto"
-    ? ["ru", "uk", "en"]
-    : [language, "ru", "uk", "en"];
+    ? ["ru", "uk", "pl", "tr", "en"]
+    : [language, "ru", "uk", "pl", "tr", "en"];
 
   captions.sort((a, b) => {
     const aScore = captionPreferenceScore(a, preferred);
@@ -2162,7 +2170,7 @@ function buildSrtForSegment(segment, cues, options) {
       const chunkStart = start + (duration / chunks.length) * index;
       const chunkEnd = start + (duration / chunks.length) * (index + 1);
       let text = chunk.join(" ");
-      if (options.uppercaseSubtitles) text = text.toLocaleUpperCase("ru-RU");
+      if (options.uppercaseSubtitles) text = text.toLocaleUpperCase(languageLocale(options.language));
       subtitleCues.push({
         start: chunkStart,
         end: Math.min(segment.duration, chunkEnd),
@@ -2228,7 +2236,7 @@ function buildTrendyCaptionChunks(segment, cues, options) {
       const rawEnd = localStart + duration * ((wordOffset + group.length) / words.length);
       wordOffset += group.length;
       let text = group.join(" ");
-      if (options.uppercaseSubtitles) text = text.toLocaleUpperCase("ru-RU");
+      if (options.uppercaseSubtitles) text = text.toLocaleUpperCase(languageLocale(options.language));
       rawChunks.push({
         start: Math.max(0, rawStart - captionLead),
         end: Math.min(segment.duration, rawEnd),
@@ -3871,6 +3879,8 @@ function stripHashtags(value) {
 
 function generateReelDescription(output) {
   const text = normalizeDescriptionText(output?.text || "");
+  const language = detectTextLanguage(text, output?.language || "auto");
+  if (language !== "ru") return generateLocalizedReelDescription(text, language);
   const hook = buildClickbaitHook(text);
   const body = buildDescriptionBody(text);
   const cta = buildDescriptionCta(text);
@@ -3881,6 +3891,50 @@ function generateReelDescription(output) {
     cta,
     hashtags
   ].filter(Boolean).join("\n\n");
+}
+
+function detectTextLanguage(text, preferred = "auto") {
+  const requested = normalizeLanguage(preferred);
+  if (requested !== "auto") return requested;
+  const value = String(text || "");
+  const lower = value.toLocaleLowerCase("und");
+  if (/[іїєґ]/iu.test(value) || /\b(що|якщо|цей|ця|для|віра|бог|господь|життя)\b/iu.test(lower)) return "uk";
+  if (/[ąćęłńóśźż]/iu.test(value) || /\b(żeby|który|która|jest|nie|dla|życie|wiara|bóg)\b/iu.test(lower)) return "pl";
+  if (/[çğıİöşü]/u.test(value) || /\b(bir|için|değil|ama|çünkü|hayat|iman|tanrı)\b/iu.test(lower)) return "tr";
+  if (/[a-z]/iu.test(value) && !/[а-яёіїєґ]/iu.test(value)) return "en";
+  return "ru";
+}
+
+function generateLocalizedReelDescription(text, language) {
+  const body = trimDescriptionWithLocale(text, 220, language);
+  const templates = {
+    uk: {
+      hook: "Ці слова спочатку звучать просто. А потім влучають прямо в серце.",
+      body: body || "Короткий фрагмент з думкою, яку хочеться дослухати до кінця.",
+      cta: "Додивись до кінця і збережи, якщо відгукнулося.",
+      hashtags: "#віра #мотивація #історія #рілс"
+    },
+    pl: {
+      hook: "Te słowa najpierw brzmią prosto. Potem trafiają dokładnie tam, gdzie trzeba.",
+      body: body || "Krótki fragment z myślą, którą warto obejrzeć do końca.",
+      cta: "Obejrzyj do końca i zapisz, jeśli poruszyło.",
+      hashtags: "#wiara #motywacja #historia #reels"
+    },
+    tr: {
+      hook: "Bu sözler önce basit geliyor. Sonra tam kalbine dokunuyor.",
+      body: body || "Sonuna kadar izlemeye değer kısa ve güçlü bir bölüm.",
+      cta: "Sonuna kadar izle ve sana dokunduysa kaydet.",
+      hashtags: "#iman #motivasyon #hikaye #reels"
+    },
+    en: {
+      hook: "These words sound simple at first. Then they land exactly where they need to.",
+      body: body || "A short moment with a thought worth watching to the end.",
+      cta: "Watch until the end and save it if it speaks to you.",
+      hashtags: "#faith #motivation #story #reels"
+    }
+  };
+  const template = templates[language] || templates.en;
+  return [template.hook, template.body, template.cta, template.hashtags].filter(Boolean).join("\n\n");
 }
 
 function normalizeDescriptionText(value) {
@@ -3954,6 +4008,26 @@ function trimDescription(text, maxLength) {
   return `${capitalize(slice.replace(/\s+\S*$/, ""))}...`;
 }
 
+function trimDescriptionWithLocale(text, maxLength, language) {
+  if (!text) return "";
+  const locale = languageLocale(language);
+  if (text.length <= maxLength) return capitalizeLocale(text, locale);
+  const slice = text.slice(0, maxLength);
+  const boundary = Math.max(slice.lastIndexOf("."), slice.lastIndexOf("!"), slice.lastIndexOf("?"));
+  if (boundary > 120) return capitalizeLocale(slice.slice(0, boundary + 1), locale);
+  return `${capitalizeLocale(slice.replace(/\s+\S*$/, ""), locale)}...`;
+}
+
+function languageLocale(language) {
+  return {
+    uk: "uk-UA",
+    pl: "pl-PL",
+    tr: "tr-TR",
+    en: "en-US",
+    ru: "ru-RU"
+  }[language] || "ru-RU";
+}
+
 function buildHashtags(text) {
   const lower = text.toLocaleLowerCase("ru-RU");
   const tags = [];
@@ -3968,7 +4042,12 @@ function buildHashtags(text) {
 
 function capitalize(value) {
   const text = String(value || "").trim();
-  return text ? text[0].toLocaleUpperCase("ru-RU") + text.slice(1) : "";
+  return capitalizeLocale(text, "ru-RU");
+}
+
+function capitalizeLocale(value, locale) {
+  const text = String(value || "").trim();
+  return text ? text[0].toLocaleUpperCase(locale) + text.slice(1) : "";
 }
 
 function cleanPromptText(value) {

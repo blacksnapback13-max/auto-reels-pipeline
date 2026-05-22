@@ -784,7 +784,7 @@
           <div class="source-toggle" role="radiogroup" aria-label="Источник видео">
             <label>
               <input name="sourceMode" type="radio" value="upload" checked>
-              <span>Видео</span>
+              <span>Видео с носителя</span>
             </label>
             <label>
               <input name="sourceMode" type="radio" value="youtube">
@@ -817,9 +817,11 @@
             <div class="field">
               <label for="language">Субтитры</label>
               <select id="language" name="language">
-                <option value="auto">Авто: RU/UK/EN</option>
+                <option value="auto">Авто: RU/UK/PL/TR/EN</option>
                 <option value="ru">Русский</option>
                 <option value="uk">Украинский</option>
+                <option value="pl">Polski</option>
+                <option value="tr">Türkçe</option>
                 <option value="en">English</option>
               </select>
             </div>
@@ -1354,6 +1356,8 @@
 
     function generateReelDescription(output) {
       const text = normalizeDescriptionText(output.text || "");
+      const language = detectTextLanguage(text, output.language || "auto");
+      if (language !== "ru") return generateLocalizedReelDescription(text, language);
       const hook = buildClickbaitHook(text);
       const body = buildDescriptionBody(text);
       const cta = buildDescriptionCta(text);
@@ -1364,6 +1368,54 @@
         cta,
         hashtags
       ].filter(Boolean).join("\n\n");
+    }
+
+    function detectTextLanguage(text, preferred = "auto") {
+      const requested = normalizeLanguage(preferred);
+      if (requested !== "auto") return requested;
+      const value = String(text || "");
+      const lower = value.toLocaleLowerCase("und");
+      if (/[іїєґ]/iu.test(value) || /\b(що|якщо|цей|ця|для|віра|бог|господь|життя)\b/iu.test(lower)) return "uk";
+      if (/[ąćęłńóśźż]/iu.test(value) || /\b(żeby|który|która|jest|nie|dla|życie|wiara|bóg)\b/iu.test(lower)) return "pl";
+      if (/[çğıİöşü]/u.test(value) || /\b(bir|için|değil|ama|çünkü|hayat|iman|tanrı)\b/iu.test(lower)) return "tr";
+      if (/[a-z]/iu.test(value) && !/[а-яёіїєґ]/iu.test(value)) return "en";
+      return "ru";
+    }
+
+    function normalizeLanguage(value) {
+      return ["auto", "ru", "uk", "en", "pl", "tr"].includes(value) ? value : "auto";
+    }
+
+    function generateLocalizedReelDescription(text, language) {
+      const body = trimDescriptionWithLocale(text, 220, language);
+      const templates = {
+        uk: {
+          hook: "Ці слова спочатку звучать просто. А потім влучають прямо в серце.",
+          body: body || "Короткий фрагмент з думкою, яку хочеться дослухати до кінця.",
+          cta: "Додивись до кінця і збережи, якщо відгукнулося.",
+          hashtags: "#віра #мотивація #історія #рілс"
+        },
+        pl: {
+          hook: "Te słowa najpierw brzmią prosto. Potem trafiają dokładnie tam, gdzie trzeba.",
+          body: body || "Krótki fragment z myślą, którą warto obejrzeć do końca.",
+          cta: "Obejrzyj do końca i zapisz, jeśli poruszyło.",
+          hashtags: "#wiara #motywacja #historia #reels"
+        },
+        tr: {
+          hook: "Bu sözler önce basit geliyor. Sonra tam kalbine dokunuyor.",
+          body: body || "Sonuna kadar izlemeye değer kısa ve güçlü bir bölüm.",
+          cta: "Sonuna kadar izle ve sana dokunduysa kaydet.",
+          hashtags: "#iman #motivasyon #hikaye #reels"
+        },
+        en: {
+          hook: "These words sound simple at first. Then they land exactly where they need to.",
+          body: body || "A short moment with a thought worth watching to the end.",
+          cta: "Watch until the end and save it if it speaks to you.",
+          hashtags: "#faith #motivation #story #reels"
+        }
+      };
+      const template = templates[language] || templates.en;
+      return [template.hook, template.body, template.cta, template.hashtags].filter(Boolean).join("\n\n");
     }
 
     function normalizeDescriptionText(value) {
@@ -1428,6 +1480,26 @@
       return `${capitalize(slice.replace(/\s+\S*$/, ""))}...`;
     }
 
+    function trimDescriptionWithLocale(text, maxLength, language) {
+      if (!text) return "";
+      const locale = languageLocale(language);
+      if (text.length <= maxLength) return capitalizeLocale(text, locale);
+      const slice = text.slice(0, maxLength);
+      const boundary = Math.max(slice.lastIndexOf("."), slice.lastIndexOf("!"), slice.lastIndexOf("?"));
+      if (boundary > 120) return capitalizeLocale(slice.slice(0, boundary + 1), locale);
+      return `${capitalizeLocale(slice.replace(/\s+\S*$/, ""), locale)}...`;
+    }
+
+    function languageLocale(language) {
+      return {
+        uk: "uk-UA",
+        pl: "pl-PL",
+        tr: "tr-TR",
+        en: "en-US",
+        ru: "ru-RU"
+      }[language] || "ru-RU";
+    }
+
     function buildHashtags(text) {
       const lower = text.toLocaleLowerCase("ru-RU");
       const tags = [];
@@ -1441,7 +1513,12 @@
 
     function capitalize(value) {
       const text = String(value || "").trim();
-      return text ? text[0].toLocaleUpperCase("ru-RU") + text.slice(1) : "";
+      return capitalizeLocale(text, "ru-RU");
+    }
+
+    function capitalizeLocale(value, locale) {
+      const text = String(value || "").trim();
+      return text ? text[0].toLocaleUpperCase(locale) + text.slice(1) : "";
     }
 
     function statusLabel(status) {

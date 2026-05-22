@@ -128,7 +128,7 @@ def render_caption(chunk, output_path, width=1080, height=1920):
     line_h = text_size(draw, "АГРУYQ", font, stroke)[1]
     gap = int(line_h * 0.18)
     block_h = len(lines) * line_h + max(0, len(lines) - 1) * gap
-    y = int(height * 0.705 - block_h / 2)
+    y = int(height * 0.78 - block_h / 2)
 
     word_index = 0
     shadow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
