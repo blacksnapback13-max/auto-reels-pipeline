@@ -81,6 +81,8 @@ const REEL_SUBTITLE_FONT_SIZE = clampInt(process.env.REEL_SUBTITLE_FONT_SIZE, 8,
 const REEL_SUBTITLE_MARGIN_V = clampInt(process.env.REEL_SUBTITLE_MARGIN_V, 40, 360, 105);
 const TRENDY_CAPTIONS_ENABLED = readBooleanEnv("TRENDY_CAPTIONS_ENABLED", !IS_PRODUCTION);
 const TRENDY_CAPTION_MAX_OVERLAYS = clampInt(process.env.TRENDY_CAPTION_MAX_OVERLAYS, 8, 90, IS_PRODUCTION ? 28 : 90);
+const REEL_AUTO_PAN_ENABLED = readBooleanEnv("REEL_AUTO_PAN_ENABLED", true);
+const REEL_AUTO_PAN_INTERVAL_SECONDS = clampInt(process.env.REEL_AUTO_PAN_INTERVAL_SECONDS, 1, 4, 2);
 const REEL_BLUR_STRENGTH = clampInt(process.env.REEL_BLUR_STRENGTH, 0, 40, 24);
 const REEL_PAD_COLOR = sanitizeFfmpegColor(process.env.REEL_PAD_COLOR || "black");
 const TOOLS_STATUS_CACHE_MS = Number(process.env.TOOLS_STATUS_CACHE_MS || 5 * 60 * 1000);
@@ -161,6 +163,7 @@ function normalizeReelBackgroundMode(value) {
   const mode = String(value || "").trim().toLowerCase();
   if (mode === "fit-blur" || mode === "blur") return "blur";
   if (mode === "fit" || mode === "pad") return "pad";
+  if (mode === "auto-pan" || mode === "crop-pan" || mode === "pan") return "crop-pan";
   if (mode === "fill" || mode === "crop") return "crop";
   return "blur";
 }
@@ -2512,14 +2515,17 @@ function readFfmpegProgressSeconds(state) {
   return 0;
 }
 
-function buildVerticalVideoFilters({ subtitleFilter, baseLabel, backgroundMode = REEL_BACKGROUND_MODE }) {
+function buildVerticalVideoFilters({ subtitleFilter, baseLabel, backgroundMode = REEL_BACKGROUND_MODE, panPath = null }) {
   const width = REEL_WIDTH;
   const height = REEL_HEIGHT;
   const mode = normalizeReelBackgroundMode(backgroundMode);
 
-  if (mode === "crop") {
+  if (mode === "crop" || mode === "crop-pan") {
+    const xExpression = mode === "crop-pan" && panPath?.expression
+      ? panPath.expression
+      : "(iw-ow)/2";
     return [
-      `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},setsar=1${subtitleFilter}[${baseLabel}]`
+      `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}:${xExpression}:(ih-oh)/2,setsar=1${subtitleFilter}[${baseLabel}]`
     ];
   }
 
@@ -2538,8 +2544,183 @@ function buildVerticalVideoFilters({ subtitleFilter, baseLabel, backgroundMode =
   ];
 }
 
+async function buildAutoPanPath(job, input, segment, backgroundMode) {
+  if (!REEL_AUTO_PAN_ENABLED || normalizeReelBackgroundMode(backgroundMode) !== "crop-pan") return null;
+
+  const probe = job.source || {};
+  const sourceWidth = Number(probe.width || 0);
+  const sourceHeight = Number(probe.height || 0);
+  if (!sourceWidth || !sourceHeight) return null;
+
+  const scale = Math.max(REEL_WIDTH / sourceWidth, REEL_HEIGHT / sourceHeight);
+  const scaledWidth = sourceWidth * scale;
+  const cropRange = Math.max(0, scaledWidth - REEL_WIDTH);
+  if (cropRange < 4) return null;
+
+  const frameWidth = 192;
+  const frameHeight = Math.max(64, Math.round(frameWidth * sourceHeight / sourceWidth));
+  const duration = Math.max(0.1, Number(segment.end - segment.start) || 0);
+  const sampleInterval = Math.max(1, REEL_AUTO_PAN_INTERVAL_SECONDS);
+  const fps = 1 / sampleInterval;
+  const expectedFrames = Math.max(2, Math.min(28, Math.ceil(duration / sampleInterval) + 1));
+
+  let buffer;
+  try {
+    buffer = await runCommandBuffer("ffmpeg", [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-ss",
+      String(segment.start),
+      "-t",
+      String(duration),
+      "-i",
+      input,
+      "-vf",
+      `fps=${fps.toFixed(3)},scale=${frameWidth}:${frameHeight}:force_original_aspect_ratio=decrease,pad=${frameWidth}:${frameHeight}:(ow-iw)/2:(oh-ih)/2:black,format=gray`,
+      "-frames:v",
+      String(expectedFrames),
+      "-f",
+      "rawvideo",
+      "pipe:1"
+    ], {
+      cwd: job.dir,
+      timeoutMs: Math.max(12000, expectedFrames * 1400)
+    });
+  } catch (error) {
+    log(job, `Auto pan: анализ кадров не удался, использую центр: ${shortError(error)}`);
+    return null;
+  }
+
+  const frameSize = frameWidth * frameHeight;
+  const frameCount = Math.floor(buffer.length / frameSize);
+  if (frameCount < 2) {
+    log(job, "Auto pan: мало кадров для анализа, использую центр");
+    return null;
+  }
+
+  const detections = [];
+  let previous = null;
+  for (let index = 0; index < frameCount; index += 1) {
+    const frame = buffer.subarray(index * frameSize, (index + 1) * frameSize);
+    const detection = detectSpeakerCenter(frame, previous, frameWidth, frameHeight);
+    detections.push({
+      time: Math.min(duration, index * sampleInterval),
+      ...detection
+    });
+    previous = frame;
+  }
+
+  const reliable = detections.filter((item) => item.confidence >= 0.18);
+  if (reliable.length < Math.max(2, Math.ceil(frameCount * 0.35))) {
+    log(job, "Auto pan: объект не найден стабильно, использую центр");
+    return null;
+  }
+
+  const smoothed = smoothPanDetections(detections, cropRange, scaledWidth);
+  if (!smoothed.length) return null;
+  const expression = buildCropExpression(smoothed);
+  const minX = Math.round(Math.min(...smoothed.map((point) => point.x)));
+  const maxX = Math.round(Math.max(...smoothed.map((point) => point.x)));
+  log(job, `Auto pan: включен, смещение crop ${minX}-${maxX}px`);
+  return { expression, points: smoothed };
+}
+
+function detectSpeakerCenter(frame, previous, width, height) {
+  const scores = new Float64Array(width);
+  const yStart = Math.floor(height * 0.12);
+  const yEnd = Math.floor(height * 0.92);
+
+  for (let y = yStart; y < yEnd; y += 1) {
+    const row = y * width;
+    const verticalWeight = 1 - Math.abs((y / height) - 0.48) * 0.75;
+    for (let x = 1; x < width - 1; x += 1) {
+      const value = frame[row + x];
+      const edge = Math.abs(value - frame[row + x - 1]) + Math.abs(value - frame[row + x + 1]);
+      const motion = previous ? Math.abs(value - previous[row + x]) * 0.65 : 0;
+      scores[x] += (edge + motion) * Math.max(0.35, verticalWeight);
+    }
+  }
+
+  const blurRadius = 5;
+  const blurred = new Float64Array(width);
+  for (let x = 0; x < width; x += 1) {
+    let total = 0;
+    let weight = 0;
+    for (let dx = -blurRadius; dx <= blurRadius; dx += 1) {
+      const xx = x + dx;
+      if (xx < 0 || xx >= width) continue;
+      const w = blurRadius + 1 - Math.abs(dx);
+      total += scores[xx] * w;
+      weight += w;
+    }
+    const centerBias = 0.78 + 0.22 * (1 - Math.abs((x / Math.max(1, width - 1)) - 0.5) * 2);
+    blurred[x] = (total / Math.max(1, weight)) * centerBias;
+  }
+
+  let total = 0;
+  for (const value of blurred) total += value;
+  if (total <= 0) return { fraction: 0.5, confidence: 0 };
+
+  let weightedX = 0;
+  let peak = 0;
+  for (let x = 0; x < width; x += 1) {
+    weightedX += blurred[x] * x;
+    peak = Math.max(peak, blurred[x]);
+  }
+
+  const fraction = Math.max(0.12, Math.min(0.88, weightedX / total / Math.max(1, width - 1)));
+  const confidence = Math.max(0, Math.min(1, peak / (total / width + 1) / 8));
+  return { fraction, confidence };
+}
+
+function smoothPanDetections(detections, cropRange, scaledWidth) {
+  const centerX = cropRange / 2;
+  const maxOffset = cropRange * 0.38;
+  const maxStep = Math.max(24, cropRange * 0.12);
+  const points = [];
+  let lastX = centerX;
+
+  for (const item of detections) {
+    const rawTarget = item.fraction * scaledWidth - REEL_WIDTH / 2;
+    const clampedTarget = Math.max(centerX - maxOffset, Math.min(centerX + maxOffset, rawTarget));
+    const confidence = Math.max(0, Math.min(1, item.confidence));
+    const blended = centerX * (1 - confidence) + clampedTarget * confidence;
+    const x = Math.max(0, Math.min(cropRange, lastX + Math.max(-maxStep, Math.min(maxStep, blended - lastX))));
+    points.push({ time: round2(item.time), x: round2(x) });
+    lastX = x;
+  }
+
+  if (points.length > 1) {
+    points[0].time = 0;
+    points[points.length - 1].time = Math.max(points[points.length - 1].time, detections.at(-1)?.time || 0);
+  }
+  return points;
+}
+
+function buildCropExpression(points) {
+  if (!Array.isArray(points) || points.length === 0) return "(iw-ow)/2";
+  if (points.length === 1) return String(Math.round(points[0].x));
+
+  let expression = String(Math.round(points.at(-1).x));
+  for (let index = points.length - 2; index >= 0; index -= 1) {
+    const current = points[index];
+    const next = points[index + 1];
+    const dt = Math.max(0.001, next.time - current.time);
+    const x0 = round2(current.x);
+    const x1 = round2(next.x);
+    const t0 = round2(current.time);
+    const t1 = round2(next.time);
+    const interpolated = `${x0}+(${x1}-${x0})*(t-${t0})/${dt}`;
+    expression = `if(lt(t\\,${t1})\\,${interpolated}\\,${expression})`;
+  }
+  return expression;
+}
+
 async function renderSegment({ job, input, output, srtName, captionOverlays = [], segment, outputName = "reel.mp4", reelNumber = 1, reelTotal = 1 }) {
   const duration = Math.max(0.1, segment.end - segment.start);
+  const backgroundMode = job.options?.cropMode || REEL_BACKGROUND_MODE;
+  const panPath = await buildAutoPanPath(job, input, segment, backgroundMode);
   const onStdoutLine = createFfmpegProgressHandler(job, {
     duration,
     outputName,
@@ -2572,7 +2753,8 @@ async function renderSegment({ job, input, output, srtName, captionOverlays = []
   const filterParts = buildVerticalVideoFilters({
     subtitleFilter,
     baseLabel,
-    backgroundMode: job.options?.cropMode || REEL_BACKGROUND_MODE
+    backgroundMode,
+    panPath
   });
 
   let currentLabel = baseLabel;
@@ -2756,6 +2938,56 @@ function runCommand(command, args, options = {}, job = null) {
         resolve(stdout.trim());
       } else {
         reject(new Error(`${command} exited with code ${code}: ${stderr.slice(-1200) || stdout.slice(-1200)}`));
+      }
+    });
+  });
+}
+
+function runCommandBuffer(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const timeoutMs = Number(options.timeoutMs || 0);
+    const child = spawn(command, args, {
+      cwd: options.cwd || ROOT,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    const stdout = [];
+    const stderr = [];
+    let timedOut = false;
+    let timeout = null;
+    let forceKillTimeout = null;
+    if (timeoutMs > 0) {
+      timeout = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        forceKillTimeout = setTimeout(() => {
+          child.kill("SIGKILL");
+        }, COMMAND_KILL_GRACE_MS);
+      }, timeoutMs);
+    }
+    const clearTimers = () => {
+      if (timeout) clearTimeout(timeout);
+      if (forceKillTimeout) clearTimeout(forceKillTimeout);
+    };
+
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.on("error", (error) => {
+      clearTimers();
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimers();
+      const stderrText = Buffer.concat(stderr).toString("utf8").slice(-1200);
+      if (timedOut) {
+        reject(new Error(`${command} timed out after ${timeoutMs}ms: ${stderrText}`));
+        return;
+      }
+      if (code === 0) {
+        resolve(Buffer.concat(stdout));
+      } else {
+        reject(new Error(`${command} exited with code ${code}: ${stderrText}`));
       }
     });
   });
