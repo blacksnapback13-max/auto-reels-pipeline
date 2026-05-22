@@ -88,7 +88,7 @@ def wrap_words(draw, words, font, max_width, stroke_width):
 
 def fit_layout(draw, words, width):
     max_width = int(width * 0.82)
-    for size in range(62, 34, -4):
+    for size in range(42, 24, -3):
         font = load_font(size)
         stroke = max(2, round(size * 0.055))
         lines = wrap_words(draw, words, font, max_width, stroke)
@@ -97,7 +97,7 @@ def fit_layout(draw, words, width):
             if line_widths and max(line_widths) <= max_width:
                 return font, stroke, lines
 
-    font = load_font(34)
+    font = load_font(24)
     return font, 2, wrap_words(draw, words, font, max_width, 2)
 
 
@@ -128,7 +128,7 @@ def render_caption(chunk, output_path, width=1080, height=1920):
     line_h = text_size(draw, "АГРУYQ", font, stroke)[1]
     gap = int(line_h * 0.18)
     block_h = len(lines) * line_h + max(0, len(lines) - 1) * gap
-    y = int(height * 0.78 - block_h / 2)
+    y = int(height * 0.84 - block_h / 2)
 
     word_index = 0
     shadow = Image.new("RGBA", (width, height), (0, 0, 0, 0))

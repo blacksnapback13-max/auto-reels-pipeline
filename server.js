@@ -78,7 +78,7 @@ const REEL_BACKGROUND_MODE = normalizeReelBackgroundMode(process.env.REEL_BACKGR
 const REEL_VIDEO_PRESET = safeFfmpegToken(process.env.REEL_VIDEO_PRESET || (IS_PRODUCTION ? "ultrafast" : "veryfast"), IS_PRODUCTION ? "ultrafast" : "veryfast");
 const REEL_VIDEO_CRF = clampInt(process.env.REEL_VIDEO_CRF, 16, 35, IS_PRODUCTION ? 24 : 20);
 const REEL_SUBTITLE_FONT_SIZE = clampInt(process.env.REEL_SUBTITLE_FONT_SIZE, 8, 36, 14);
-const REEL_SUBTITLE_MARGIN_V = clampInt(process.env.REEL_SUBTITLE_MARGIN_V, 40, 360, 105);
+const REEL_SUBTITLE_MARGIN_V = clampInt(process.env.REEL_SUBTITLE_MARGIN_V, 24, 360, 70);
 const TRENDY_CAPTIONS_ENABLED = readBooleanEnv("TRENDY_CAPTIONS_ENABLED", !IS_PRODUCTION);
 const TRENDY_CAPTION_MAX_OVERLAYS = clampInt(process.env.TRENDY_CAPTION_MAX_OVERLAYS, 8, 90, IS_PRODUCTION ? 28 : 90);
 const REEL_AUTO_PAN_ENABLED = readBooleanEnv("REEL_AUTO_PAN_ENABLED", true);
@@ -2546,6 +2546,7 @@ function buildVerticalVideoFilters({ subtitleFilter, baseLabel, backgroundMode =
 
 async function buildAutoPanPath(job, input, segment, backgroundMode) {
   if (!REEL_AUTO_PAN_ENABLED || normalizeReelBackgroundMode(backgroundMode) !== "crop-pan") return null;
+  log(job, "Auto pan: анализирую движение спикера для crop");
 
   const probe = job.source || {};
   const sourceWidth = Number(probe.width || 0);
@@ -2611,8 +2612,8 @@ async function buildAutoPanPath(job, input, segment, backgroundMode) {
     previous = frame;
   }
 
-  const reliable = detections.filter((item) => item.confidence >= 0.18);
-  if (reliable.length < Math.max(2, Math.ceil(frameCount * 0.35))) {
+  const reliable = detections.filter((item) => item.confidence >= 0.08);
+  if (reliable.length < Math.max(1, Math.ceil(frameCount * 0.2))) {
     log(job, "Auto pan: объект не найден стабильно, использую центр");
     return null;
   }
@@ -2669,15 +2670,31 @@ function detectSpeakerCenter(frame, previous, width, height) {
     peak = Math.max(peak, blurred[x]);
   }
 
-  const fraction = Math.max(0.12, Math.min(0.88, weightedX / total / Math.max(1, width - 1)));
-  const confidence = Math.max(0, Math.min(1, peak / (total / width + 1) / 8));
+  const windowRadius = Math.max(12, Math.round(width * 0.14));
+  let bestX = Math.round(weightedX / total);
+  let bestScore = -1;
+  for (let x = 0; x < width; x += 1) {
+    let windowScore = 0;
+    for (let dx = -windowRadius; dx <= windowRadius; dx += 1) {
+      const xx = x + dx;
+      if (xx < 0 || xx >= width) continue;
+      windowScore += blurred[xx];
+    }
+    if (windowScore > bestScore) {
+      bestScore = windowScore;
+      bestX = x;
+    }
+  }
+
+  const fraction = Math.max(0.06, Math.min(0.94, bestX / Math.max(1, width - 1)));
+  const confidence = Math.max(0, Math.min(1, peak / (total / width + 1) / 4));
   return { fraction, confidence };
 }
 
 function smoothPanDetections(detections, cropRange, scaledWidth) {
   const centerX = cropRange / 2;
-  const maxOffset = cropRange * 0.38;
-  const maxStep = Math.max(24, cropRange * 0.12);
+  const maxOffset = cropRange * 0.9;
+  const maxStep = Math.max(36, cropRange * 0.24);
   const points = [];
   let lastX = centerX;
 
@@ -2685,7 +2702,8 @@ function smoothPanDetections(detections, cropRange, scaledWidth) {
     const rawTarget = item.fraction * scaledWidth - REEL_WIDTH / 2;
     const clampedTarget = Math.max(centerX - maxOffset, Math.min(centerX + maxOffset, rawTarget));
     const confidence = Math.max(0, Math.min(1, item.confidence));
-    const blended = centerX * (1 - confidence) + clampedTarget * confidence;
+    const followWeight = Math.max(0.35, confidence);
+    const blended = centerX * (1 - followWeight) + clampedTarget * followWeight;
     const x = Math.max(0, Math.min(cropRange, lastX + Math.max(-maxStep, Math.min(maxStep, blended - lastX))));
     points.push({ time: round2(item.time), x: round2(x) });
     lastX = x;
