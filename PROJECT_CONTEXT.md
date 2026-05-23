@@ -1,4 +1,4 @@
-# Авто сборка рилсов
+# Авто сборка рилсов Онлайн
 
 Рабочая папка:
 
@@ -6,27 +6,27 @@
 
 ## Назначение
 
-Автоматически собирает рилсы
+Онлайн-версия автосборки рилсов: Render + GitHub + локальный воркер для YouTube anti-bot.
 
 ## Статус
 
-- Статус: Готов
+- Статус: В работе
 - Версия: v0.1
 - Готовая сборка: да
 
 ## На чем остановились
 
-Приложение собрано и запущено на 127.0.0.1:3232. Дашборд подключен к /api/jobs/latest для статуса автосборки.
+Онлайн-версия развернута на Render, свежие cookies подключены, бесплатные yt-dlp fallbacks исчерпаны; докручивается гибрид с локальным Mac-воркером.
 
 ## Следующие шаги
 
-- Показывать прогресс текущей сборки рилсов через taskUrl.
-- Добавить историю последних job прямо в карточку проекта.
-- Добавить кнопку открытия папки outputs последней сборки.
+- Доделать online-гибрид: Render ставит задачу в очередь, локальный Mac-воркер забирает и возвращает результат.
+- Добавить постоянное хранилище для готовых рилсов и обложек.
+- Оставить оффлайн-версию неизменной как стабильную локальную сборку.
 
 ## Ошибки и риски
 
-- Во время тяжелого ffmpeg-рендера процент обновляется по этапам job, а не по внутреннему прогрессу ffmpeg.
+- YouTube блокирует облачный IP Render даже со свежими cookies; нужен local-worker или residential/mobile YTDLP_PROXY.
 
 ## Рекомендации Codex
 
@@ -101,17 +101,8 @@
 
 ## История изменений
 
-- 2026-05-17T18:25:00Z: Docker дополняется `bgutil-ytdlp-pot-provider` 1.3.1 и сервер автоматически добавляет `youtubepot-bgutilscript`; `yt-dlp` теперь пробует третий anti-bot профиль `Innertube/mweb + POT без cookies` для публичных видео.
-- 2026-05-17T18:15:00Z: Render healthcheck вынесен на легкий `/api/health`, `/api/config` теперь кэширует статус `yt-dlp`/`ffmpeg`/`python`, а job-логи выводятся в stdout с маскированием секретов.
-- 2026-05-17T18:05:00Z: Добавлен anti-bot fallback для Render: при `Sign in to confirm you're not a bot` `yt-dlp` автоматически повторяется через `youtube:player_skip=webpage,configs;player_client=default,mweb`; добавлены env-настройки `YTDLP_PO_TOKEN`, `YTDLP_PROXY`, `YTDLP_EXTRACTOR_ARGS` и маскирование секретов в логах.
-- 2026-05-17T17:50:00Z: Добавлен fallback для `yt-dlp` formats: метаданные читаются с `--skip-download --no-check-formats`, скачивание пробует 720p MP4, затем bestvideo+bestaudio, затем single best.
-- 2026-05-17T17:35:00Z: Добавлена мобильная версия интерфейса: одно-колоночные формы/steps, крупные touch-кнопки, перенос длинных job/log/error строк, аккуратные карточки output/cover на 390px.
-- 2026-05-17T14:20:00Z: Добавлена поддержка YouTube cookies для Render: `YTDLP_COOKIES_BASE64`, `YTDLP_COOKIES_TEXT` и `YTDLP_COOKIES_PATH`; все вызовы `yt-dlp` используют `--cookies`, а ошибка anti-bot стала понятной в UI.
-- 2026-05-17T13:05:00Z: Добавлен опциональный persistent storage через Cloudinary: MP4, PNG-обложки, референс-кадры и `job.json` зеркалятся во внешнее хранилище при наличии `CLOUDINARY_URL`; ZIP умеет читать MP4 из удаленных URL.
-- 2026-05-17T12:24:08Z: GitHub repo создан и опубликован: `https://github.com/blacksnapback13-max/auto-reels-pipeline`; Render service `auto-reels-shtunda13` live на `https://auto-reels-shtunda13.onrender.com`, Docker runtime, region frankfurt, health `/api/config`.
-- 2026-05-17T01:45:00Z: Проект подготовлен к GitHub/Render: добавлены Dockerfile, .dockerignore, render.yaml, runtime data исключены из git; онлайн-версия использует Docker с ffmpeg, python3/Pillow и yt-dlp.
-- 2026-05-17T01:30:00Z: Финальная обложка собирается в два шага: бесплатная AI-модель генерирует фон без текста, затем Pillow локально накладывает крупный триггерный заголовок, контрастные плашки и затемняет/размывает зоны с возможным AI-псевдотекстом.
-- 2026-05-17T00:00:00Z: Обложки привязаны к описанию из транскрипта; добавлен free-only image-router `gemini -> cloudflare -> huggingface -> qwen -> pollinations` и учет `data/image-usage.json`.
+- 2026-05-17T23:52:27.159Z: Проект разделен: эта карточка теперь Online-версия для Render/GitHub/local-worker.
+- 2026-05-17T12:06:22.162Z: PROJECT_CONTEXT.md синхронизирован из карточки проекта.
 - 2026-05-17T12:04:46.306Z: PROJECT_CONTEXT.md синхронизирован из карточки проекта.
 - 2026-05-17T12:03:48.785Z: Mind map заполнена полным описанием проекта: архитектура, запуск, процессы, планы, риски, рекомендации и история.
 - 2026-05-17T11:55:32.105Z: PROJECT_CONTEXT.md синхронизирован из карточки проекта.

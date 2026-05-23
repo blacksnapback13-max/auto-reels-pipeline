@@ -23,6 +23,12 @@ services:
         value: auto-reels
       - key: UPLOAD_VIDEO_LIMIT_MB
         value: "700"
+      - key: BACKGROUND_AUDIO_LIMIT_MB
+        value: "250"
+      - key: BACKGROUND_AUDIO_VOLUME_PERCENT
+        value: "25"
+      - key: CAPTION_SYNC_OFFSET_SECONDS
+        value: "0.3"
       - key: ASR_PROVIDER
         value: auto
       - key: CLOUDFLARE_ASR_MODEL

@@ -71,14 +71,17 @@ const YTDLP_METADATA_TIMEOUT_MS = readPositiveIntEnv("YTDLP_METADATA_TIMEOUT_MS"
 const YTDLP_DOWNLOAD_TIMEOUT_MS = readPositiveIntEnv("YTDLP_DOWNLOAD_TIMEOUT_MS", 10 * 60 * 1000);
 const COMMAND_KILL_GRACE_MS = readPositiveIntEnv("COMMAND_KILL_GRACE_MS", 5000);
 const LOCAL_WORKER_UPLOAD_LIMIT_BYTES = readPositiveIntEnv("LOCAL_WORKER_UPLOAD_LIMIT_MB", 300) * 1024 * 1024;
-const UPLOAD_VIDEO_LIMIT_BYTES = readPositiveIntEnv("UPLOAD_VIDEO_LIMIT_MB", 700) * 1024 * 1024;
+const UPLOAD_VIDEO_LIMIT_BYTES = readPositiveIntEnv("UPLOAD_VIDEO_LIMIT_MB", 8192) * 1024 * 1024;
+const DEFAULT_BACKGROUND_AUDIO_VOLUME = clampInt(process.env.BACKGROUND_AUDIO_VOLUME_PERCENT, 0, 100, 25) / 100;
+const BACKGROUND_AUDIO_LIMIT_BYTES = readPositiveIntEnv("BACKGROUND_AUDIO_LIMIT_MB", 250) * 1024 * 1024;
+const CAPTION_SYNC_OFFSET_SECONDS = Number(process.env.CAPTION_SYNC_OFFSET_SECONDS || 0.3);
 const REEL_WIDTH = readEvenPositiveIntEnv("REEL_WIDTH", IS_PRODUCTION ? 720 : 1080);
 const REEL_HEIGHT = readEvenPositiveIntEnv("REEL_HEIGHT", IS_PRODUCTION ? 1280 : 1920);
 const REEL_BACKGROUND_MODE = normalizeReelBackgroundMode(process.env.REEL_BACKGROUND_MODE || (IS_PRODUCTION ? "crop" : "blur"));
 const REEL_VIDEO_PRESET = safeFfmpegToken(process.env.REEL_VIDEO_PRESET || (IS_PRODUCTION ? "ultrafast" : "veryfast"), IS_PRODUCTION ? "ultrafast" : "veryfast");
 const REEL_VIDEO_CRF = clampInt(process.env.REEL_VIDEO_CRF, 16, 35, IS_PRODUCTION ? 24 : 20);
-const REEL_SUBTITLE_FONT_SIZE = clampInt(process.env.REEL_SUBTITLE_FONT_SIZE, 8, 36, 14);
-const REEL_SUBTITLE_MARGIN_V = clampInt(process.env.REEL_SUBTITLE_MARGIN_V, 24, 360, 70);
+const REEL_SUBTITLE_FONT_SIZE = clampInt(process.env.REEL_SUBTITLE_FONT_SIZE, 8, 36, 18);
+const REEL_SUBTITLE_MARGIN_V = clampInt(process.env.REEL_SUBTITLE_MARGIN_V, 24, 360, 165);
 const TRENDY_CAPTIONS_ENABLED = readBooleanEnv("TRENDY_CAPTIONS_ENABLED", !IS_PRODUCTION);
 const TRENDY_CAPTION_MAX_OVERLAYS = clampInt(process.env.TRENDY_CAPTION_MAX_OVERLAYS, 8, 90, IS_PRODUCTION ? 28 : 90);
 const REEL_AUTO_PAN_ENABLED = readBooleanEnv("REEL_AUTO_PAN_ENABLED", true);
@@ -121,18 +124,19 @@ function makeId() {
 }
 
 function defaultOptions(input = {}) {
-  const count = clampInt(input.count, 1, 6, 3);
-  const minDuration = clampInt(input.minDuration, 15, 90, 28);
-  const maxDuration = clampInt(input.maxDuration, minDuration + 5, 120, 55);
+  const count = clampInt(input.count, 1, 10, 10);
+  const minDuration = clampInt(input.minDuration, 15, 90, 15);
+  const maxDuration = clampInt(input.maxDuration, minDuration + 5, 120, 120);
 
   return {
     count,
     minDuration,
     maxDuration,
     language: normalizeLanguage(input.language),
-    subtitles: input.subtitles !== false,
-    uppercaseSubtitles: input.uppercaseSubtitles !== false,
-    cropMode: normalizeReelBackgroundMode(input.cropMode || "fit-blur")
+    subtitles: parseBooleanParam(input.subtitles, true),
+    uppercaseSubtitles: parseBooleanParam(input.uppercaseSubtitles, true),
+    cropMode: normalizeReelBackgroundMode(input.cropMode || "crop-pan"),
+    backgroundAudioVolume: Math.round(normalizeBackgroundAudioVolume(input.backgroundAudioVolume) * 100)
   };
 }
 
@@ -140,6 +144,10 @@ function clampInt(value, min, max, fallback) {
   const n = Number.parseInt(value, 10);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(min, Math.min(max, n));
+}
+
+function normalizeBackgroundAudioVolume(value) {
+  return clampInt(value, 0, 100, Math.round(DEFAULT_BACKGROUND_AUDIO_VOLUME * 100)) / 100;
 }
 
 function readPositiveIntEnv(name, fallback) {
@@ -868,8 +876,8 @@ async function runJob(job) {
     await setStep(job, "render", "running");
     const filters = await getFfmpegFilterSupport().catch(() => ({ subtitles: false, drawtext: false }));
     const captionRenderer = await getCaptionRendererSupport().catch((error) => ({ ok: false, error: error.message }));
-    const canRenderImageCaptions = job.options.subtitles && cues.length > 0 && TRENDY_CAPTIONS_ENABLED && captionRenderer.ok;
-    const canBurnSubtitles = job.options.subtitles && cues.length > 0 && !canRenderImageCaptions && filters.subtitles;
+    const canBurnSubtitles = job.options.subtitles && cues.length > 0 && filters.subtitles;
+    const canRenderImageCaptions = job.options.subtitles && cues.length > 0 && !canBurnSubtitles && TRENDY_CAPTIONS_ENABLED && captionRenderer.ok;
     job.render = {
       subtitleMode: canRenderImageCaptions ? "trendy-image-overlays" : (canBurnSubtitles ? "ffmpeg-subtitles" : "none"),
       subtitleBurn: canRenderImageCaptions || canBurnSubtitles,
@@ -887,10 +895,10 @@ async function runJob(job) {
       trendyCaptionsEnabled: TRENDY_CAPTIONS_ENABLED,
       trendyCaptionMaxOverlays: TRENDY_CAPTION_MAX_OVERLAYS
     };
-    if (canRenderImageCaptions) {
-      log(job, "Субтитры: трендовые PNG-оверлеи через Pillow");
-    } else if (canBurnSubtitles) {
+    if (canBurnSubtitles) {
       log(job, "Субтитры: стандартный ffmpeg subtitles/libass");
+    } else if (canRenderImageCaptions) {
+      log(job, "Субтитры: резервные PNG-оверлеи через Pillow");
     } else if (job.options.subtitles && cues.length > 0 && !TRENDY_CAPTIONS_ENABLED && filters.subtitles) {
       log(job, "Субтитры: PNG-оверлеи отключены для Render, использую SRT");
     } else if (job.options.subtitles && cues.length > 0) {
@@ -1723,12 +1731,30 @@ function parseJson3(raw) {
     if (!event.segs || event.segs.length === 0) continue;
     const start = Number(event.tStartMs || 0) / 1000;
     const duration = Number(event.dDurationMs || 0) / 1000;
+    const end = Math.max(start + 0.5, start + duration);
     const text = cleanCaptionText(event.segs.map((seg) => seg.utf8 || "").join(""));
     if (!text || text === "\n") continue;
+    const words = [];
+    for (let index = 0; index < event.segs.length; index += 1) {
+      const seg = event.segs[index];
+      const word = cleanCaptionWord(seg.utf8 || "");
+      if (!word) continue;
+      const wordStart = start + Number(seg.tOffsetMs || 0) / 1000;
+      const next = event.segs.slice(index + 1).find((item) => cleanCaptionWord(item.utf8 || ""));
+      const wordEnd = next?.tOffsetMs !== undefined
+        ? start + Number(next.tOffsetMs || 0) / 1000
+        : end;
+      words.push({
+        word,
+        start: Math.max(start, wordStart),
+        end: Math.max(wordStart + 0.08, Math.min(end, wordEnd))
+      });
+    }
     cues.push({
       start,
-      end: Math.max(start + 0.5, start + duration),
-      text
+      end,
+      text,
+      words
     });
   }
 
@@ -2214,37 +2240,36 @@ async function buildTrendyCaptionAssets({ job, segment, cues, options, reelIndex
 
   return chunks.map((chunk, index) => ({
     ...chunk,
-    file: path.join(captionRoot, `cap_${String(index).padStart(3, "0")}.png`)
+    file: path.join(captionRoot, "cap_" + String(index).padStart(3, "0") + ".png")
   }));
 }
 
 function buildTrendyCaptionChunks(segment, cues, options) {
   const overlapping = cues.filter((cue) => cue.end > segment.start && cue.start < segment.end);
   const rawChunks = [];
-  const captionLead = 0.1;
 
   for (const cue of overlapping) {
     const localStart = Math.max(0, cue.start - segment.start);
     const localEnd = Math.min(segment.duration, cue.end - segment.start);
     const duration = Math.max(0.35, localEnd - localStart);
-    const words = cue.text
+    const words = String(cue.text || "")
       .split(/\s+/)
       .map(cleanCaptionWord)
       .filter(Boolean);
     if (words.length === 0) continue;
 
     let wordOffset = 0;
-    for (const group of groupWordsForCaptionCue(words)) {
+    for (const group of groupWordsForPlainCaption(words)) {
       const rawStart = localStart + duration * (wordOffset / words.length);
       const rawEnd = localStart + duration * ((wordOffset + group.length) / words.length);
       wordOffset += group.length;
       let text = group.join(" ");
       if (options.uppercaseSubtitles) text = text.toLocaleUpperCase(languageLocale(options.language));
       rawChunks.push({
-        start: Math.max(0, rawStart - captionLead),
-        end: Math.min(segment.duration, rawEnd),
+        start: Math.max(0, rawStart + CAPTION_SYNC_OFFSET_SECONDS),
+        end: Math.min(segment.duration, rawEnd + CAPTION_SYNC_OFFSET_SECONDS),
         text,
-        emphasisIndex: chooseEmphasisIndex(group)
+        emphasisIndex: -1
       });
     }
   }
@@ -2267,7 +2292,7 @@ function buildTrendyCaptionChunks(segment, cues, options) {
       end,
       duration: round2(end - start),
       text: chunk.text,
-      emphasisIndex: chunk.emphasisIndex
+      emphasisIndex: -1
     });
   }
 
@@ -2279,12 +2304,25 @@ function buildTrendyCaptionChunks(segment, cues, options) {
     }));
 }
 
-function groupWordsForCaptionCue(words) {
+function groupWordsForPlainCaption(words) {
   const groups = [];
   let index = 0;
   while (index < words.length) {
     const remaining = words.length - index;
     const size = remaining <= 7 ? remaining : 6;
+    groups.push(words.slice(index, index + size));
+    index += size;
+  }
+  return groups;
+}
+
+function groupWordsForCaptionCue(words) {
+  const groups = [];
+  let index = 0;
+  while (index < words.length) {
+    const remaining = words.length - index;
+    const first = words[index] || "";
+    const size = remaining <= 3 ? remaining : (first.length >= 10 ? 2 : 3);
     groups.push(words.slice(index, index + size));
     index += size;
   }
@@ -2300,13 +2338,13 @@ function groupCaptionWordItems(items) {
     let end = items[index].end;
     index += 1;
 
-    while (index < items.length && group.length < 4) {
+    while (index < items.length && group.length < 5) {
       const next = items[index];
       const gap = next.start - end;
       const projectedDuration = next.end - group[0].start;
-      const shouldStop = gap > 0.3 ||
-        projectedDuration > 2.25 ||
-        (group.length >= 2 && /[.!?…]$/.test(group[group.length - 1].word));
+      const shouldStop = gap > 0.45 ||
+        projectedDuration > 2.8 ||
+        (group.length >= 3 && /[.!?…]$/.test(group[group.length - 1].word));
       if (shouldStop) break;
       group.push(next);
       end = next.end;
@@ -2757,13 +2795,27 @@ async function renderSegment({ job, input, output, srtName, captionOverlays = []
     input
   ];
   for (const caption of captionOverlays) {
+    if (caption.type === "video") {
+      inputArgs.push("-i", caption.file);
+    } else {
+      inputArgs.push(
+        "-loop",
+        "1",
+        "-t",
+        String(Math.max(0.3, caption.end - caption.start + 0.12)),
+        "-i",
+        caption.file
+      );
+    }
+  }
+  const backgroundAudioPath = resolveBackgroundAudioPath(job);
+  const backgroundAudioInputIndex = backgroundAudioPath ? 1 + captionOverlays.length : null;
+  if (backgroundAudioPath) {
     inputArgs.push(
-      "-loop",
-      "1",
-      "-t",
-      String(Math.max(0.3, caption.end - caption.start + 0.12)),
+      "-stream_loop",
+      "-1",
       "-i",
-      caption.file
+      backgroundAudioPath
     );
   }
 
@@ -2782,19 +2834,39 @@ async function renderSegment({ job, input, output, srtName, captionOverlays = []
     const nextLabel = index === captionOverlays.length - 1 ? "v" : `vo${index}`;
     const start = Math.max(0, caption.start).toFixed(3);
     const end = Math.min(duration, caption.end).toFixed(3);
-    const fadeOutStart = Math.max(0, caption.end - caption.start - 0.06).toFixed(3);
-    filterParts.push(
-      `[${inputIndex}:v]format=rgba,fade=t=in:st=0:d=0.05:alpha=1,fade=t=out:st=${fadeOutStart}:d=0.05:alpha=1,setpts=PTS-STARTPTS+${start}/TB[${captionLabel}]`
-    );
+    if (caption.type === "video") {
+      filterParts.push(`[${inputIndex}:v]format=rgba,setpts=PTS-STARTPTS[${captionLabel}]`);
+    } else {
+      filterParts.push(
+        `[${inputIndex}:v]format=rgba,setpts=PTS-STARTPTS+${start}/TB[${captionLabel}]`
+      );
+    }
     filterParts.push(
       `[${currentLabel}][${captionLabel}]overlay=0:0:eof_action=pass:enable='between(t,${start},${end})'[${nextLabel}]`
     );
     currentLabel = nextLabel;
   });
 
+  const fadeOutStart = Math.max(0, duration - 0.03).toFixed(3);
+  const audioArgs = [];
+  if (backgroundAudioPath) {
+    const backgroundVolume = Number.isFinite(Number(job.backgroundAudio?.volume))
+      ? Math.max(0, Math.min(1, Number(job.backgroundAudio.volume)))
+      : DEFAULT_BACKGROUND_AUDIO_VOLUME;
+    filterParts.push(`[0:a]loudnorm=I=-16:TP=-1.5:LRA=11,afade=t=in:st=0:d=0.03,afade=t=out:st=${fadeOutStart}:d=0.03,volume=1.0[a_voice]`);
+    filterParts.push(`[${backgroundAudioInputIndex}:a]atrim=0:${duration.toFixed(3)},asetpts=PTS-STARTPTS,volume=${backgroundVolume.toFixed(2)},afade=t=in:st=0:d=0.05,afade=t=out:st=${fadeOutStart}:d=0.05[a_music]`);
+    filterParts.push("[a_voice][a_music]amix=inputs=2:duration=first:dropout_transition=0[a]");
+    audioArgs.push("-map", "[a]");
+  } else {
+    audioArgs.push(
+      "-map",
+      "0:a?",
+      "-af",
+      `loudnorm=I=-16:TP=-1.5:LRA=11,afade=t=in:st=0:d=0.03,afade=t=out:st=${fadeOutStart}:d=0.03`
+    );
+  }
   const filterComplex = filterParts.join(";");
 
-  const fadeOutStart = Math.max(0, duration - 0.03).toFixed(3);
   await runCommand("ffmpeg", [
     "-y",
     "-hide_banner",
@@ -2808,10 +2880,7 @@ async function renderSegment({ job, input, output, srtName, captionOverlays = []
     filterComplex,
     "-map",
     "[v]",
-    "-map",
-    "0:a?",
-    "-af",
-    `loudnorm=I=-16:TP=-1.5:LRA=11,afade=t=in:st=0:d=0.03,afade=t=out:st=${fadeOutStart}:d=0.03`,
+    ...audioArgs,
     "-c:v",
     "libx264",
     "-preset",
@@ -3140,6 +3209,121 @@ async function readRequestBody(req) {
   const raw = buffer.toString("utf8");
   if (!raw) return {};
   return JSON.parse(raw);
+}
+
+async function readJobRequest(req, limitBytes = BACKGROUND_AUDIO_LIMIT_BYTES + 1024 * 1024) {
+  const contentType = String(req.headers["content-type"] || "");
+  if (!contentType.startsWith("multipart/form-data")) {
+    return { fields: await readRequestBody(req), files: {} };
+  }
+  return parseMultipartForm(await readRequestBuffer(req, limitBytes), contentType);
+}
+
+function parseMultipartForm(buffer, contentType) {
+  const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+  const boundary = boundaryMatch?.[1] || boundaryMatch?.[2];
+  if (!boundary) throw new Error("Не удалось прочитать multipart boundary");
+  const raw = buffer.toString("latin1");
+  const parts = raw.split(`--${boundary}`).slice(1, -1);
+  const fields = {};
+  const files = {};
+
+  for (const part of parts) {
+    const clean = part.replace(/^\r\n/, "");
+    const headerEnd = clean.indexOf("\r\n\r\n");
+    if (headerEnd < 0) continue;
+    const headerText = clean.slice(0, headerEnd);
+    let body = clean.slice(headerEnd + 4);
+    if (body.endsWith("\r\n")) body = body.slice(0, -2);
+    const disposition = headerText.match(/content-disposition:\s*([^\r\n]+)/i)?.[1] || "";
+    const name = disposition.match(/name="([^"]+)"/i)?.[1];
+    if (!name) continue;
+    const filename = disposition.match(/filename="([^"]*)"/i)?.[1] || "";
+    if (filename) {
+      files[name] = {
+        filename: sanitizeUploadFilename(filename),
+        contentType: headerText.match(/content-type:\s*([^\r\n]+)/i)?.[1]?.trim() || "application/octet-stream",
+        buffer: Buffer.from(body, "latin1")
+      };
+    } else {
+      fields[name] = Buffer.from(body, "latin1").toString("utf8");
+    }
+  }
+
+  return { fields, files };
+}
+
+function audioExtensionFrom(filename, contentType = "") {
+  const ext = path.extname(String(filename || "")).toLowerCase();
+  const allowed = new Set([".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".aiff", ".aif"]);
+  if (allowed.has(ext)) return ext;
+  if (/mpeg|mp3/i.test(contentType)) return ".mp3";
+  if (/wav/i.test(contentType)) return ".wav";
+  if (/flac/i.test(contentType)) return ".flac";
+  if (/aac/i.test(contentType)) return ".aac";
+  if (/ogg/i.test(contentType)) return ".ogg";
+  if (/opus/i.test(contentType)) return ".opus";
+  if (/mp4|m4a/i.test(contentType)) return ".m4a";
+  return "";
+}
+
+async function attachBackgroundAudio(job, file) {
+  if (!file || !file.buffer?.length) return;
+  if (file.buffer.length > BACKGROUND_AUDIO_LIMIT_BYTES) {
+    throw new Error(`Аудиофайл слишком большой: лимит ${formatBytes(BACKGROUND_AUDIO_LIMIT_BYTES)}`);
+  }
+  const ext = audioExtensionFrom(file.filename, file.contentType);
+  if (!ext) {
+    throw new Error("Музыкальная подложка должна быть аудиофайлом: MP3, WAV, FLAC, M4A, AAC, OGG или OPUS");
+  }
+  const dir = path.join(job.dir, "assets");
+  await fsp.mkdir(dir, { recursive: true });
+  const audioName = `background-audio${ext}`;
+  const audioPath = path.join(dir, audioName);
+  await fsp.writeFile(audioPath, file.buffer);
+  job.backgroundAudio = {
+    name: file.filename,
+    file: path.relative(job.dir, audioPath),
+    bytes: file.buffer.length,
+    contentType: file.contentType || "",
+    volume: normalizeBackgroundAudioVolume(job.options?.backgroundAudioVolume)
+  };
+  log(job, `Музыкальная подложка: ${file.filename}, ${formatBytes(file.buffer.length)}, громкость ${Math.round(job.backgroundAudio.volume * 100)}%`);
+}
+
+async function attachBackgroundAudioFromRequest(job, req, originalName, contentType) {
+  const ext = audioExtensionFrom(originalName, contentType);
+  if (!ext) {
+    throw new Error("Музыкальная подложка должна быть аудиофайлом: MP3, WAV, FLAC, M4A, AAC, OGG или OPUS");
+  }
+  const contentLength = Number(req.headers["content-length"] || 0);
+  if (contentLength > BACKGROUND_AUDIO_LIMIT_BYTES) {
+    const error = new Error(`Аудиофайл слишком большой: лимит ${formatBytes(BACKGROUND_AUDIO_LIMIT_BYTES)}`);
+    error.statusCode = 413;
+    throw error;
+  }
+
+  const dir = path.join(job.dir, "assets");
+  await fsp.mkdir(dir, { recursive: true });
+  const audioName = `background-audio${ext}`;
+  const audioPath = path.join(dir, audioName);
+  const bytes = await readRequestToFile(req, audioPath, BACKGROUND_AUDIO_LIMIT_BYTES);
+  if (bytes <= 0) throw new Error("Музыкальная подложка не загрузилась: файл пустой");
+  job.backgroundAudio = {
+    name: originalName,
+    file: path.relative(job.dir, audioPath),
+    bytes,
+    contentType: contentType || "",
+    volume: normalizeBackgroundAudioVolume(job.options?.backgroundAudioVolume)
+  };
+  log(job, `Музыкальная подложка: ${originalName}, ${formatBytes(bytes)}, громкость ${Math.round(job.backgroundAudio.volume * 100)}%`);
+}
+
+function resolveBackgroundAudioPath(job) {
+  if (!job.backgroundAudio?.file) return null;
+  const filePath = path.resolve(job.dir, String(job.backgroundAudio.file));
+  const root = path.resolve(job.dir);
+  return filePath === root || filePath.startsWith(`${root}${path.sep}`) ? filePath : null;
 }
 
 async function readRequestBuffer(req, limitBytes = 50 * 1024 * 1024) {
@@ -3730,6 +3914,58 @@ async function generateCoverForOutput(job, outputIndex, description, settingsInp
     }
   }
 
+  if (referenceFrame?.path) {
+    log(job, "Обложка: улучшаю кадр из готового рилса и накладываю локальный заголовок");
+    const image = await renderLocalFrameCover({
+      job,
+      output,
+      outputIndex,
+      description: coverDescription,
+      settings,
+      referenceFrame,
+      coversDir,
+      headline,
+      fallbackReason: ""
+    });
+    const coverName = `reel-${outputIndex + 1}-cover.${imageExtension(image.mimeType || "image/png")}`;
+    const relativePath = path.join("covers", coverName);
+    const coverLocalPath = path.join(job.dir, relativePath);
+    const coverLocalFile = `/jobs/${job.id}/${relativePath.split(path.sep).join("/")}`;
+    await fsp.writeFile(coverLocalPath, image.buffer);
+    const coverAsset = {
+      file: coverLocalFile,
+      localFile: coverLocalFile
+    };
+    await persistJobAsset(job, coverAsset, {
+      localPath: coverLocalPath,
+      kind: "cover",
+      resourceType: "image",
+      mimeType: image.mimeType || "image/png",
+      publicId: `${CLOUDINARY_FOLDER}/${job.id}/covers/reel-${outputIndex + 1}-cover`,
+      logLabel: `обложка Reel ${outputIndex + 1}`
+    });
+    output.cover = {
+      file: coverAsset.file,
+      localFile: coverLocalFile,
+      referenceFrame: referenceFrame.file,
+      provider: image.provider,
+      model: image.model,
+      size: image.size,
+      quality: image.quality,
+      generatedAt: iso(),
+      prompt: image.revisedPrompt || "",
+      headline: image.headline || headline,
+      description: coverDescription,
+      typography: image.typography || "",
+      storage: coverAsset.storage || null
+    };
+    output.description = coverDescription;
+    await saveJob(job);
+    await persistJobSnapshot(job);
+    log(job, `Обложка готова из кадра рилса: ${coverName}`);
+    return output.cover;
+  }
+
   const prompt = buildCoverPrompt(job, output, coverDescription, settings, null, headline);
   const referencePrompt = buildCoverPrompt(job, output, coverDescription, settings, referenceFrame, headline);
   let image = null;
@@ -3823,19 +4059,20 @@ async function generateCoverForOutput(job, outputIndex, description, settingsInp
 
 async function captureReelReferenceFrame(job, output, outputIndex, coversDir) {
   const sourcePath = resolveJobSourcePath(job);
-  const videoPath = sourcePath || resolveJobOutputPath(job, output);
+  const outputPath = resolveJobOutputPath(job, output);
+  const videoPath = outputPath || sourcePath;
   if (!videoPath) return null;
 
   const frameName = `reel-${outputIndex + 1}-reference.jpg`;
   const framePath = path.join(coversDir, frameName);
   const duration = Math.max(0.4, Number(output.duration || 0));
   const sourceDuration = Math.max(0.4, Number(job.source?.duration || duration));
-  const timestamp = sourcePath
+  const timestamp = outputPath
+    ? Math.max(0.2, Math.min(duration - 0.2, duration * 0.5))
+    : sourcePath
     ? Math.max(0.2, Math.min(sourceDuration - 0.2, Number(output.start || 0) + duration * 0.5))
     : Math.max(0.2, Math.min(duration - 0.2, duration * 0.5));
-  const frameFilter = sourcePath
-    ? "[0:v]split=2[v0][v1];[v0]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=18:1,eq=brightness=-0.07:saturation=0.85[bg];[v1]scale=720:1280:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1"
-    : "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2";
+  const frameFilter = "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1";
 
   await runCommand("ffmpeg", [
     "-y",
@@ -5306,6 +5543,95 @@ async function handleApi(req, res, pathname) {
     return;
   }
 
+  if (req.method === "POST" && pathname === "/api/jobs/upload/start") {
+    const input = await readRequestBody(req);
+    input.subtitles = parseBooleanParam(input.subtitles, true);
+    const job = createJob("", defaultOptions(input), {
+      inputType: "upload",
+      upload: null
+    });
+    jobs.set(job.id, job);
+    await saveJob(job);
+    sendJson(res, 201, { job: publicJob(job) });
+    return;
+  }
+
+  const backgroundUploadMatch = pathname.match(/^\/api\/jobs\/([^/]+)\/background-audio$/);
+  if (req.method === "POST" && backgroundUploadMatch) {
+    const job = jobs.get(backgroundUploadMatch[1]);
+    if (!job) {
+      sendJson(res, 404, { error: "Job not found" });
+      return;
+    }
+    if (job.status !== "queued" || job.upload?.sourceFile) {
+      sendJson(res, 409, { error: "Музыку можно загрузить только до старта рендера" });
+      return;
+    }
+
+    const requestUrl = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+    const originalName = sanitizeUploadFilename(requestUrl.searchParams.get("filename") || "background-audio.mp3");
+    const contentType = String(req.headers["content-type"] || "");
+    try {
+      await attachBackgroundAudioFromRequest(job, req, originalName, contentType);
+      await saveJob(job);
+      sendJson(res, 200, { job: publicJob(job) });
+    } catch (error) {
+      sendJson(res, error.statusCode || 400, { error: error.message || "Не удалось загрузить музыку" });
+    }
+    return;
+  }
+
+  const sourceUploadMatch = pathname.match(/^\/api\/jobs\/([^/]+)\/source$/);
+  if (req.method === "POST" && sourceUploadMatch) {
+    const job = jobs.get(sourceUploadMatch[1]);
+    if (!job) {
+      sendJson(res, 404, { error: "Job not found" });
+      return;
+    }
+    if (job.status !== "queued" || job.upload?.sourceFile) {
+      sendJson(res, 409, { error: "Эта задача уже запущена" });
+      return;
+    }
+
+    const requestUrl = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+    const originalName = sanitizeUploadFilename(requestUrl.searchParams.get("filename"));
+    const contentType = req.headers["content-type"] || "";
+    const ext = uploadExtensionFrom(originalName, contentType);
+    if (!ext) {
+      sendJson(res, 400, { error: "Поддерживаются видеофайлы MP4, MOV, M4V, WEBM или MKV" });
+      return;
+    }
+
+    const contentLength = Number(req.headers["content-length"] || 0);
+    if (contentLength > UPLOAD_VIDEO_LIMIT_BYTES) {
+      sendJson(res, 413, { error: `Файл слишком большой: лимит ${formatBytes(UPLOAD_VIDEO_LIMIT_BYTES)}` });
+      return;
+    }
+
+    job.upload = {
+      originalName,
+      sourceFile: `source${ext}`,
+      contentType: String(contentType || ""),
+      bytes: 0
+    };
+    try {
+      await saveJob(job);
+      const targetPath = path.join(job.dir, job.upload.sourceFile);
+      const bytes = await readRequestToFile(req, targetPath, UPLOAD_VIDEO_LIMIT_BYTES);
+      if (bytes <= 0) throw new Error("Видео не загрузилось: файл пустой");
+      job.upload.bytes = bytes;
+      log(job, `Загружен файл: ${originalName}, ${formatBytes(bytes)}`);
+      await saveJob(job);
+      enqueueJob(job);
+      sendJson(res, 202, { job: publicJob(job) });
+    } catch (error) {
+      jobs.delete(job.id);
+      await fsp.rm(job.dir, { recursive: true, force: true }).catch(() => {});
+      sendJson(res, error.statusCode || 400, { error: error.message || "Не удалось загрузить видео" });
+    }
+    return;
+  }
+
   if (req.method === "POST" && pathname === "/api/jobs/upload") {
     const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
     const originalName = sanitizeUploadFilename(url.searchParams.get("filename"));
@@ -5354,7 +5680,7 @@ async function handleApi(req, res, pathname) {
   }
 
   if (req.method === "POST" && pathname === "/api/jobs") {
-    const body = await readRequestBody(req);
+    const { fields: body, files } = await readJobRequest(req);
     const url = String(body.url || "").trim();
     const validation = validateYoutubeUrl(url);
     if (!validation.ok) {
@@ -5362,10 +5688,16 @@ async function handleApi(req, res, pathname) {
       return;
     }
     const job = createJob(url, defaultOptions(body));
-    jobs.set(job.id, job);
-    await saveJob(job);
-    enqueueJob(job);
-    sendJson(res, 202, { job: publicJob(job) });
+    try {
+      await attachBackgroundAudio(job, files.backgroundAudio);
+      jobs.set(job.id, job);
+      await saveJob(job);
+      enqueueJob(job);
+      sendJson(res, 202, { job: publicJob(job) });
+    } catch (error) {
+      await fsp.rm(job.dir, { recursive: true, force: true }).catch(() => {});
+      sendJson(res, error.statusCode || 400, { error: error.message });
+    }
     return;
   }
 

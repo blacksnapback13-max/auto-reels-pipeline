@@ -806,12 +806,16 @@
             <div class="field">
               <label for="count">Рилсов</label>
               <select id="count" name="count">
-                <option value="3">3</option>
                 <option value="1">1</option>
                 <option value="2">2</option>
+                <option value="3">3</option>
                 <option value="4">4</option>
                 <option value="5">5</option>
                 <option value="6">6</option>
+                <option value="7">7</option>
+                <option value="8">8</option>
+                <option value="9">9</option>
+                <option value="10" selected>10</option>
               </select>
             </div>
             <div class="field">
@@ -830,25 +834,33 @@
           <div class="grid">
             <div class="field">
               <label for="minDuration">Минимум, сек</label>
-              <input id="minDuration" name="minDuration" type="number" min="15" max="90" value="28">
+              <input id="minDuration" name="minDuration" type="number" min="15" max="90" value="15">
             </div>
             <div class="field">
               <label for="maxDuration">Максимум, сек</label>
-              <input id="maxDuration" name="maxDuration" type="number" min="20" max="120" value="55">
+              <input id="maxDuration" name="maxDuration" type="number" min="20" max="120" value="120">
             </div>
           </div>
 
           <label class="switch">
             <input id="subtitles" name="subtitles" type="checkbox" checked>
-            Добавлять субтитры
+            Добавлять субтитры на рилс
           </label>
+
+          <div class="field">
+            <label for="backgroundAudio">Музыкальная подложка</label>
+            <input id="backgroundAudio" name="backgroundAudio" type="file" accept="audio/*,.mp3,.wav,.flac,.m4a,.aac,.ogg,.opus">
+            <label for="backgroundAudioVolume">Громкость музыки: <span id="backgroundAudioVolumeValue">25%</span></label>
+            <input id="backgroundAudioVolume" name="backgroundAudioVolume" type="range" min="0" max="100" step="1" value="25">
+            <p class="hint">Голос остается 100%, музыка регулируется ползунком.</p>
+          </div>
 
           <div class="field">
             <label for="cropMode">Формат видео</label>
             <select id="cropMode" name="cropMode">
-              <option value="fit-blur" selected>Как офлайн: видео целиком + фон</option>
+              <option value="fit-blur">Как офлайн: видео целиком + фон</option>
               <option value="crop">На весь экран</option>
-              <option value="crop-pan">На весь экран · авто pan</option>
+              <option value="crop-pan" selected>На весь экран · AutoPan</option>
             </select>
           </div>
 
@@ -870,6 +882,9 @@
     const sourceFields = [...document.querySelectorAll("[data-source-field]")];
     const urlInput = document.querySelector("#url");
     const videoInput = document.querySelector("#videoFile");
+    const backgroundAudioInput = document.querySelector("#backgroundAudio");
+    const backgroundAudioVolume = document.querySelector("#backgroundAudioVolume");
+    const backgroundAudioVolumeValue = document.querySelector("#backgroundAudioVolumeValue");
     const jobPanel = document.querySelector("#jobPanel");
     const toolStatus = document.querySelector("#toolStatus");
     const API_BASE = location.protocol === "file:" ? "http://127.0.0.1:3232" : "";
@@ -889,6 +904,9 @@
     let pollTimer = null;
 
     sourceRadios.forEach((radio) => radio.addEventListener("change", syncSourceMode));
+    backgroundAudioVolume.addEventListener("input", () => {
+      backgroundAudioVolumeValue.textContent = `${backgroundAudioVolume.value}%`;
+    });
     syncSourceMode();
 
     form.addEventListener("submit", async (event) => {
@@ -921,11 +939,22 @@
 
     async function createJob(payload) {
       if (payload.sourceMode === "youtube") {
-        const response = await fetch(`${API_BASE}/api/jobs`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(payload)
-        });
+        const backgroundAudio = backgroundAudioInput.files?.[0] || null;
+        const request = backgroundAudio
+          ? {
+              method: "POST",
+              body: (() => {
+                const data = new FormData(form);
+                data.set("subtitles", payload.subtitles ? "true" : "false");
+                return data;
+              })()
+            }
+          : {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(payload)
+            };
+        const response = await fetch(`${API_BASE}/api/jobs`, request);
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Не удалось создать задачу");
         return data;
@@ -933,16 +962,85 @@
 
       const file = videoInput.files?.[0];
       if (!file) throw new Error("Выберите видеофайл");
+      const backgroundAudio = backgroundAudioInput.files?.[0] || null;
+      if (backgroundAudio) {
+        const startData = await createUploadShellJob(payload);
+        renderJob(startData.job);
+        await uploadBackgroundAudioJob(startData.job.id, backgroundAudio);
+        return uploadSourceVideoJob(startData.job.id, file);
+      }
       const params = new URLSearchParams({
         filename: file.name,
-        count: payload.count || "3",
+        count: payload.count || "10",
         language: payload.language || "auto",
-        minDuration: payload.minDuration || "28",
-        maxDuration: payload.maxDuration || "55",
-        cropMode: payload.cropMode || "fit-blur",
+        minDuration: payload.minDuration || "15",
+        maxDuration: payload.maxDuration || "120",
+        cropMode: payload.cropMode || "crop-pan",
         subtitles: payload.subtitles ? "true" : "false"
       });
       return uploadVideoJob(`${API_BASE}/api/jobs/upload?${params.toString()}`, file);
+    }
+
+    async function createUploadShellJob(payload) {
+      const response = await fetch(`${API_BASE}/api/jobs/upload/start`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          count: payload.count || "10",
+          language: payload.language || "auto",
+          minDuration: payload.minDuration || "15",
+          maxDuration: payload.maxDuration || "120",
+          cropMode: payload.cropMode || "crop-pan",
+          subtitles: payload.subtitles ? "true" : "false",
+          backgroundAudioVolume: payload.backgroundAudioVolume || "25"
+        })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Не удалось создать задачу");
+      return data;
+    }
+
+    function uploadBackgroundAudioJob(jobId, file) {
+      const params = new URLSearchParams({ filename: file.name });
+      return uploadFileWithProgress({
+        url: `${API_BASE}/api/jobs/${encodeURIComponent(jobId)}/background-audio?${params.toString()}`,
+        file,
+        title: "Загрузка музыки",
+        error: "Не удалось загрузить музыку"
+      });
+    }
+
+    function uploadSourceVideoJob(jobId, file) {
+      const params = new URLSearchParams({ filename: file.name });
+      return uploadFileWithProgress({
+        url: `${API_BASE}/api/jobs/${encodeURIComponent(jobId)}/source?${params.toString()}`,
+        file,
+        title: "Загрузка видео",
+        error: "Не удалось загрузить видео"
+      });
+    }
+
+    function uploadFileWithProgress({ url, file, title, error }) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", url);
+        xhr.responseType = "json";
+        xhr.setRequestHeader("content-type", file.type || "application/octet-stream");
+        xhr.upload.onprogress = (event) => {
+          const percent = event.lengthComputable ? Math.round((event.loaded / event.total) * 100) : 0;
+          jobPanel.innerHTML = `<div class="progress-panel"><div class="progress-row"><strong>${escapeHtml(title)}</strong><span>${percent}%</span></div><div class="progress-bar"><span class="progress-fill" style="width: ${percent}%"></span></div><p class="output-copy">${escapeHtml(file.name)}</p></div>`;
+        };
+        xhr.onload = () => {
+          const data = xhr.response || {};
+          if (xhr.status < 200 || xhr.status >= 300) {
+            reject(new Error(data.error || error));
+          } else {
+            resolve(data);
+          }
+        };
+        xhr.onerror = () => reject(new Error(error));
+        xhr.send(file);
+      });
     }
 
     function uploadVideoJob(url, file) {

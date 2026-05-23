@@ -9,12 +9,6 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 
 FONT_CANDIDATES = [
-    os.environ.get("CAPTION_FONT_PATH", ""),
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
     "/System/Library/Fonts/Supplemental/Arial.ttf",
     "/System/Library/Fonts/Helvetica.ttc",
@@ -25,20 +19,12 @@ FONT_CANDIDATES = [
 
 def load_font(size):
     for candidate in FONT_CANDIDATES:
-        if candidate and os.path.exists(candidate):
+        if os.path.exists(candidate):
             try:
                 return ImageFont.truetype(candidate, size=size)
             except Exception:
                 continue
-    for family in ("DejaVuSans-Bold.ttf", "Arial.ttf"):
-        try:
-            return ImageFont.truetype(family, size=size)
-        except Exception:
-            continue
-    try:
-        return ImageFont.load_default(size=size)
-    except TypeError:
-        return ImageFont.load_default()
+    return ImageFont.load_default(size=size)
 
 
 def text_size(draw, text, font, stroke_width=0):
@@ -88,17 +74,11 @@ def wrap_words(draw, words, font, max_width, stroke_width):
 
 def fit_layout(draw, words, width):
     max_width = int(width * 0.82)
-    for size in range(42, 24, -3):
-        font = load_font(size)
-        stroke = max(2, round(size * 0.055))
-        lines = wrap_words(draw, words, font, max_width, stroke)
-        if len(lines) <= 2:
-            line_widths = [line_width(draw, line, font, stroke) for line in lines]
-            if line_widths and max(line_widths) <= max_width:
-                return font, stroke, lines
-
-    font = load_font(24)
-    return font, 2, wrap_words(draw, words, font, max_width, 2)
+    size = 42
+    font = load_font(size)
+    stroke = max(2, round(size * 0.055))
+    lines = wrap_words(draw, words, font, max_width, stroke)
+    return font, stroke, lines[:2]
 
 
 def line_width(draw, words, font, stroke_width):
@@ -118,8 +98,7 @@ def render_caption(chunk, output_path, width=1080, height=1920):
         return
 
     words = text.split()
-    emphasis = int(chunk.get("emphasisIndex", len(words) - 1))
-    emphasis = max(0, min(len(words) - 1, emphasis))
+    emphasis = -1
 
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
@@ -127,8 +106,9 @@ def render_caption(chunk, output_path, width=1080, height=1920):
 
     line_h = text_size(draw, "АГРУYQ", font, stroke)[1]
     gap = int(line_h * 0.18)
-    block_h = len(lines) * line_h + max(0, len(lines) - 1) * gap
-    y = int(height * 0.84 - block_h / 2)
+    reserved_lines = 2
+    reserved_h = reserved_lines * line_h + (reserved_lines - 1) * gap
+    y = int(height * 0.68 - reserved_h / 2)
 
     word_index = 0
     shadow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
@@ -142,8 +122,8 @@ def render_caption(chunk, output_path, width=1080, height=1920):
 
         for word in line:
             word_w, word_h = text_size(draw, word, font, stroke)
-            is_emphasis = word_index == emphasis
-            fill = (255, 220, 72, 255) if is_emphasis else (255, 255, 255, 255)
+            is_current = word_index == emphasis
+            fill = (255, 220, 72, 255) if is_current else (255, 255, 255, 255)
 
             shadow_draw.text(
                 (x + 4, line_y + 5),
@@ -171,6 +151,54 @@ def render_caption(chunk, output_path, width=1080, height=1920):
     combined.save(output_path)
 
 
+def render_caption_image(chunk, width=1080, height=1920):
+    temp = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    output_path = Path("__memory_caption.png")
+    # Keep the drawing logic in one place by rendering to a temporary in-memory-like file
+    # when called by the frame renderer.
+    render_caption(chunk, output_path, width=width, height=height)
+    try:
+        return Image.open(output_path).convert("RGBA")
+    finally:
+        try:
+            output_path.unlink()
+        except OSError:
+            pass
+
+
+def render_frames(data, output_dir, width, height):
+    chunks = data.get("chunks", [])
+    duration = float(data.get("duration") or 0)
+    fps = int(data.get("frameRate") or 12)
+    fps = max(6, min(15, fps))
+    frame_count = max(1, math.ceil(duration * fps))
+    transparent = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    cache = {}
+
+    for frame_index in range(frame_count):
+        time = frame_index / fps
+        active = None
+        for chunk in chunks:
+          if float(chunk.get("start", 0)) <= time < float(chunk.get("end", 0)):
+              active = chunk
+              break
+        output_path = output_dir / f"frame_{frame_index:05d}.png"
+        if active:
+            key = (
+                active.get("text", ""),
+                int(active.get("emphasisIndex", 0)),
+                float(active.get("highlightProgress", 1.0)),
+            )
+            image = cache.get(key)
+            if image is None:
+                render_caption(active, output_path, width=width, height=height)
+                cache[key] = Image.open(output_path).convert("RGBA")
+                continue
+            image.save(output_path)
+        else:
+            transparent.save(output_path)
+
+
 def main():
     if len(sys.argv) != 3:
         print("usage: render_trendy_captions.py captions.json output_dir", file=sys.stderr)
@@ -183,6 +211,11 @@ def main():
     data = json.loads(config_path.read_text(encoding="utf-8"))
     width = int(data.get("width", 1080))
     height = int(data.get("height", 1920))
+
+    if data.get("mode") == "frames":
+        render_frames(data, output_dir, width, height)
+        print(json.dumps({"frames": max(1, math.ceil(float(data.get("duration") or 0) * int(data.get("frameRate") or 12)))}))
+        return 0
 
     for index, chunk in enumerate(data.get("chunks", [])):
         output_path = output_dir / f"cap_{index:03d}.png"
