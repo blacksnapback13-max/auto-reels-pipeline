@@ -72,6 +72,8 @@ const YTDLP_DOWNLOAD_TIMEOUT_MS = readPositiveIntEnv("YTDLP_DOWNLOAD_TIMEOUT_MS"
 const COMMAND_KILL_GRACE_MS = readPositiveIntEnv("COMMAND_KILL_GRACE_MS", 5000);
 const LOCAL_WORKER_UPLOAD_LIMIT_BYTES = readPositiveIntEnv("LOCAL_WORKER_UPLOAD_LIMIT_MB", 300) * 1024 * 1024;
 const UPLOAD_VIDEO_LIMIT_BYTES = readPositiveIntEnv("UPLOAD_VIDEO_LIMIT_MB", 8192) * 1024 * 1024;
+const YOUTUBE_INPUT_ENABLED = readBooleanEnv("YOUTUBE_INPUT_ENABLED", false);
+const PUBLIC_LATEST_JOB_ENABLED = readBooleanEnv("PUBLIC_LATEST_JOB_ENABLED", false);
 const DEFAULT_BACKGROUND_AUDIO_VOLUME = clampInt(process.env.BACKGROUND_AUDIO_VOLUME_PERCENT, 0, 100, 25) / 100;
 const BACKGROUND_AUDIO_LIMIT_BYTES = readPositiveIntEnv("BACKGROUND_AUDIO_LIMIT_MB", 250) * 1024 * 1024;
 const CAPTION_SYNC_OFFSET_SECONDS = Number(process.env.CAPTION_SYNC_OFFSET_SECONDS || 0.3);
@@ -5343,6 +5345,7 @@ async function handleApi(req, res, pathname) {
       storage: getPersistentStorageStatus(),
       asr: getAsrStatus(),
       youtube: {
+        inputEnabled: YOUTUBE_INPUT_ENABLED,
         cookies: publicYtDlpCookiesStatus(),
         antiBot: publicYtDlpAntiBotStatus()
       },
@@ -5477,6 +5480,10 @@ async function handleApi(req, res, pathname) {
   }
 
   if (req.method === "GET" && pathname === "/api/jobs/latest") {
+    if (!PUBLIC_LATEST_JOB_ENABLED) {
+      sendJson(res, 200, { job: null });
+      return;
+    }
     const latest = [...jobs.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] || null;
     sendJson(res, 200, { job: latest ? publicJob(latest) : null });
     return;
@@ -5680,6 +5687,10 @@ async function handleApi(req, res, pathname) {
   }
 
   if (req.method === "POST" && pathname === "/api/jobs") {
+    if (!YOUTUBE_INPUT_ENABLED) {
+      sendJson(res, 410, { error: "Онлайн-версия принимает только загруженные видеофайлы. Выберите видео с устройства." });
+      return;
+    }
     const { fields: body, files } = await readJobRequest(req);
     const url = String(body.url || "").trim();
     const validation = validateYoutubeUrl(url);

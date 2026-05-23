@@ -164,7 +164,21 @@ YTDLP_EXTRACTOR_ARGS=<ручные yt-dlp extractor args>
 Anti-bot fallback включен по умолчанию. Отключить его можно через `YTDLP_ANTIBOT_FALLBACK=false`, а заменить аргументы через `YTDLP_ANTIBOT_EXTRACTOR_ARGS`.
 Третий fallback без cookies для публичных видео включен через `YTDLP_ANTIBOT_NO_COOKIES=true`.
 
-## Локальный воркер для online
+## Online-режим: загрузка видео
+
+Публичная online-версия рассчитана на автономный сценарий без Mac-воркера:
+
+1. пользователь открывает сайт с телефона или компьютера;
+2. выбирает локальный MP4/MOV/WebM/MKV-файл;
+3. при желании добавляет музыкальную подложку;
+4. сервер рендерит вертикальные MP4 и отдает готовые файлы.
+
+YouTube-ссылки не являются основным online-входом: облачные IP вроде Render часто
+получают anti-bot проверку YouTube. В production этот вход отключен через
+`YOUTUBE_INPUT_ENABLED=false`, а публичная выдача последней общей задачи отключена
+через `PUBLIC_LATEST_JOB_ENABLED=false`, чтобы посетители не видели задачи друг друга.
+
+## Локальный воркер для старого YouTube fallback
 
 Если Render получает YouTube anti-bot, online-задача переходит в статус “Ждёт Mac”.
 На Mac запустить:

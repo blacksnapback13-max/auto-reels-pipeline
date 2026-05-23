@@ -772,7 +772,7 @@
     <header>
       <div>
         <h1>Авто сборка рилсов</h1>
-        <p class="subtitle">Онлайн-пайплайн: видео или YouTube ссылка на входе, вертикальные MP4-фрагменты на выходе.</p>
+        <p class="subtitle">Онлайн-пайплайн: загрузите видео с устройства, получите готовые вертикальные MP4-фрагменты.</p>
       </div>
       <div class="status-pill" id="toolStatus">Проверяю инструменты...</div>
     </header>
@@ -781,25 +781,10 @@
       <section class="panel">
         <h2>Новая сборка</h2>
         <form id="jobForm">
-          <div class="source-toggle" role="radiogroup" aria-label="Источник видео">
-            <label>
-              <input name="sourceMode" type="radio" value="upload" checked>
-              <span>Видео с носителя</span>
-            </label>
-            <label>
-              <input name="sourceMode" type="radio" value="youtube">
-              <span>YouTube</span>
-            </label>
-          </div>
-
-          <div class="field" data-source-field="upload">
-            <label for="videoFile">Файл проповеди</label>
+          <div class="field">
+            <label for="videoFile">Видео с устройства</label>
             <input id="videoFile" name="videoFile" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-m4v,.mp4,.mov,.m4v,.webm,.mkv" required>
-          </div>
-
-          <div class="field is-hidden" data-source-field="youtube">
-            <label for="url">YouTube ссылка</label>
-            <input id="url" name="url" type="url" placeholder="https://www.youtube.com/watch?v=...">
+            <p class="hint">Видео загружается на сервер и обрабатывается онлайн. YouTube-ссылки в этой версии не используются.</p>
           </div>
 
           <div class="grid">
@@ -865,7 +850,7 @@
           </div>
 
           <button id="submitButton" type="submit">Собрать рилсы</button>
-          <p class="hint">Для постоянных MP4 и обложек в online-режиме нужен Cloudinary.</p>
+          <p class="hint">Готовые MP4 сохраняются во внешнее хранилище и доступны для скачивания после рендера.</p>
         </form>
       </section>
 
@@ -878,9 +863,6 @@
   <script>
     const form = document.querySelector("#jobForm");
     const submitButton = document.querySelector("#submitButton");
-    const sourceRadios = [...document.querySelectorAll("input[name='sourceMode']")];
-    const sourceFields = [...document.querySelectorAll("[data-source-field]")];
-    const urlInput = document.querySelector("#url");
     const videoInput = document.querySelector("#videoFile");
     const backgroundAudioInput = document.querySelector("#backgroundAudio");
     const backgroundAudioVolume = document.querySelector("#backgroundAudioVolume");
@@ -889,6 +871,7 @@
     const toolStatus = document.querySelector("#toolStatus");
     const API_BASE = location.protocol === "file:" ? "http://127.0.0.1:3232" : "";
     const API_TARGET = API_BASE || location.origin;
+    const ACTIVE_JOB_STORAGE_KEY = "autoReels.activeJobId";
     const generatedDescriptions = new Map();
     const coverStates = new Map();
     const coverSettings = new Map();
@@ -903,11 +886,9 @@
     let activeJobId = null;
     let pollTimer = null;
 
-    sourceRadios.forEach((radio) => radio.addEventListener("change", syncSourceMode));
     backgroundAudioVolume.addEventListener("input", () => {
       backgroundAudioVolumeValue.textContent = `${backgroundAudioVolume.value}%`;
     });
-    syncSourceMode();
 
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -918,6 +899,7 @@
       try {
         const data = await createJob(payload);
         activeJobId = data.job.id;
+        saveActiveJobId(activeJobId);
         renderJob(data.job);
         startPolling();
       } catch (error) {
@@ -927,44 +909,14 @@
       }
     });
 
-    function syncSourceMode() {
-      const mode = sourceRadios.find((radio) => radio.checked)?.value || "upload";
-      sourceFields.forEach((field) => {
-        const active = field.dataset.sourceField === mode;
-        field.classList.toggle("is-hidden", !active);
-      });
-      urlInput.required = mode === "youtube";
-      videoInput.required = mode === "upload";
-    }
-
     async function createJob(payload) {
-      if (payload.sourceMode === "youtube") {
-        const backgroundAudio = backgroundAudioInput.files?.[0] || null;
-        const request = backgroundAudio
-          ? {
-              method: "POST",
-              body: (() => {
-                const data = new FormData(form);
-                data.set("subtitles", payload.subtitles ? "true" : "false");
-                return data;
-              })()
-            }
-          : {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify(payload)
-            };
-        const response = await fetch(`${API_BASE}/api/jobs`, request);
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "Не удалось создать задачу");
-        return data;
-      }
-
       const file = videoInput.files?.[0];
       if (!file) throw new Error("Выберите видеофайл");
       const backgroundAudio = backgroundAudioInput.files?.[0] || null;
       if (backgroundAudio) {
         const startData = await createUploadShellJob(payload);
+        activeJobId = startData.job.id;
+        saveActiveJobId(activeJobId);
         renderJob(startData.job);
         await uploadBackgroundAudioJob(startData.job.id, backgroundAudio);
         return uploadSourceVideoJob(startData.job.id, file);
@@ -976,7 +928,8 @@
         minDuration: payload.minDuration || "15",
         maxDuration: payload.maxDuration || "120",
         cropMode: payload.cropMode || "crop-pan",
-        subtitles: payload.subtitles ? "true" : "false"
+        subtitles: payload.subtitles ? "true" : "false",
+        backgroundAudioVolume: payload.backgroundAudioVolume || "25"
       });
       return uploadVideoJob(`${API_BASE}/api/jobs/upload?${params.toString()}`, file);
     }
@@ -1133,20 +1086,19 @@
       try {
         const response = await fetch(`${API_BASE}/api/config`);
         const data = await response.json();
-        const coreOk = ["yt-dlp", "ffmpeg", "ffprobe"].every((name) => data.tools?.[name]?.ok);
+        const coreOk = ["ffmpeg", "ffprobe"].every((name) => data.tools?.[name]?.ok);
         const captions = data.tools?.captionRenderer?.ok;
         const subtitles = data.tools?.ffmpeg?.filters?.subtitles;
         const storage = data.storage?.provider === "cloudinary" && data.storage?.ok ? " · Cloudinary" : "";
         const asr = data.asr?.provider === "cloudflare" && data.asr?.configured ? " · ASR" : "";
-        const youtubeCookies = data.youtube?.cookies?.configured ? " · YouTube cookies" : "";
         if (!coreOk) {
           toolStatus.textContent = "Нужно проверить инструменты";
         } else if (captions) {
-          toolStatus.textContent = `yt-dlp, ffmpeg готовы · trendy captions${storage}${asr}${youtubeCookies}`;
+          toolStatus.textContent = `ffmpeg готов · trendy captions${storage}${asr}`;
         } else if (!subtitles) {
-          toolStatus.textContent = `yt-dlp, ffmpeg готовы · без burned subtitles${storage}${asr}${youtubeCookies}`;
+          toolStatus.textContent = `ffmpeg готов · без burned subtitles${storage}${asr}`;
         } else {
-          toolStatus.textContent = `yt-dlp, ffmpeg готовы${storage}${asr}${youtubeCookies}`;
+          toolStatus.textContent = `ffmpeg готов${storage}${asr}`;
         }
         toolStatus.title = "";
       } catch (error) {
@@ -1155,9 +1107,16 @@
       }
     }
 
-    async function loadLatest() {
+    async function loadSavedJob() {
+      const savedJobId = readActiveJobId();
+      if (!savedJobId) return;
+      activeJobId = savedJobId;
       try {
-        const response = await fetch(`${API_BASE}/api/jobs/latest`);
+        const response = await fetch(`${API_BASE}/api/jobs/${encodeURIComponent(savedJobId)}`);
+        if (response.status === 404) {
+          clearActiveJobId();
+          return;
+        }
         const data = await response.json();
         if (data.job) {
           activeJobId = data.job.id;
@@ -1167,6 +1126,27 @@
       } catch (error) {
         jobPanel.innerHTML = `<p class="error">${escapeHtml(errorMessage(error))}</p>`;
       }
+    }
+
+    function saveActiveJobId(jobId) {
+      try {
+        localStorage.setItem(ACTIVE_JOB_STORAGE_KEY, jobId);
+      } catch {}
+    }
+
+    function readActiveJobId() {
+      try {
+        return localStorage.getItem(ACTIVE_JOB_STORAGE_KEY) || "";
+      } catch {
+        return "";
+      }
+    }
+
+    function clearActiveJobId() {
+      try {
+        localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+      } catch {}
+      if (activeJobId) activeJobId = null;
     }
 
     function startPolling() {
@@ -1662,7 +1642,7 @@
     }
 
     loadConfig();
-    loadLatest();
+    loadSavedJob();
   </script>
 </body>
 </html>

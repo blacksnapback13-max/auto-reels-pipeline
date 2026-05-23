@@ -21,6 +21,10 @@ services:
         value: auto
       - key: CLOUDINARY_FOLDER
         value: auto-reels
+      - key: YOUTUBE_INPUT_ENABLED
+        value: "false"
+      - key: PUBLIC_LATEST_JOB_ENABLED
+        value: "false"
       - key: UPLOAD_VIDEO_LIMIT_MB
         value: "700"
       - key: BACKGROUND_AUDIO_LIMIT_MB
